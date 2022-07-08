@@ -15,7 +15,7 @@ namespace UGUIFrameWorkEditor
             if (!path.EndsWith(".cs")) return;
             string allText = "// ========================================================\r\n"
                              + "// 作者：HeartWardrum \r\n"
-                             + "// 邮箱：1208195222@qq.com \r\n"
+                             + "// 邮箱：tianxiayifan@qq.com \r\n"
                              + "// 创建时间：#CreateTime#\r\n"
                              + "// 描述：\r\n"
                              + "// ========================================================\r\n";
