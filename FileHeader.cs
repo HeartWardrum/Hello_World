@@ -1,3 +1,4 @@
+//直接丢进工程文件夹中就能使用
 using System.IO;
 
 namespace UGUIFrameWorkEditor
