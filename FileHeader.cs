@@ -1,23 +1,22 @@
-~~~~C#
-//ç›´æ¥æ”¾å…¥å·¥ç¨‹æ–‡ä»¶ä¸­ï¼Œå³æ‹–å³ç”¨ï¼Œæ–‡ä¸åŠ ç‚¹
 using System.IO;
+
 namespace UGUIFrameWorkEditor
 {
     public class ChinarScriptFirstComment : UnityEditor.AssetModificationProcessor
     {
         /// <summary>
-        /// åœ¨èµ„æºåˆ›å»ºæ—¶è°ƒç”¨
+        /// ÔÚ×ÊÔ´´´½¨Ê±µ÷ÓÃ
         /// </summary>
-        /// <param name="path">è‡ªåŠ¨ä¼ å…¥èµ„æºè·¯å¾„</param>
+        /// <param name="path">×Ô¶¯´«Èë×ÊÔ´Â·¾¶</param>
         public static void OnWillCreateAsset(string path)
         {
             path = path.Replace(".meta", "");
             if (!path.EndsWith(".cs")) return;
             string allText = "// ========================================================\r\n"
-                             + "// ä½œè€…ï¼šHeartWardrum \r\n"
-                             + "// é‚®ç®±ï¼štianxiayifan@qq.com \r\n"
-                             + "// åˆ›å»ºæ—¶é—´ï¼š#CreateTime#\r\n"
-                             + "// æè¿°ï¼š\r\n"
+                             + "// ×÷Õß£ºHeartWardrum \r\n"
+                             + "// ÓÊÏä£º1208195222@qq.com \r\n"
+                             + "// ´´½¨Ê±¼ä£º#CreateTime#\r\n"
+                             + "// ÃèÊö£º\r\n"
                              + "// ========================================================\r\n";
             allText += File.ReadAllText(path);
             allText = allText.Replace("#CreateTime#", System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
@@ -25,5 +24,3 @@ namespace UGUIFrameWorkEditor
         }
     }
 }
-~~~~
-
