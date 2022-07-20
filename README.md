@@ -16,6 +16,16 @@
 	  > 在系统启动文件夹 C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp 内粘贴 生成的exe文件。此时会有查毒软件提醒，允许就行。
 	  >
 	  > 自此实现开机自启动
+	  
+	- [批量提取fbx中动画.cs](https://github.com/HeartWardrum/Hello_World/blob/fedc3e44d7193f756dd76659627571744eb2b5bf/GetAnimation.cs)
+	
+	- 
+	
+	- 
+	
+	- 
+	
+	  > 
 
 
 
