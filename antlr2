@@ -1,205 +1,184 @@
-下面我帮你**彻底搞清楚 ClickHouse 的 ANTLR4 语法结构、为什么找不到 ColumnExprDot / ColumnExprField、应该如何扩展现有语法来提取 WHERE 子句字段**。
+下面给你一份**可直接在现有 ClickHouse ANTLR4 语法基础上使用的方案**，无需修改 ClickHouseLexer.g4 / ClickHouseParser.g4，只需要**新建一个 Listener** 来提取 WHERE 子句中的字段名。
+
+你当前遇到的问题是：
+
+* 没有 `ColumnExprDotContext`
+* 没有 `ColumnExprFieldContext`
+* 没有 `visitColumnExpr`
+* 只有大量 `visitColumnExprXXX`
+* 你只有 **Listener** 而不是 Visitor
+
+这些都是 **ClickHouse 官方语法本身的结构决定的**，不是你用错了。
+
+ClickHouse 的字段实际上出现在：
+
+* `columnExpr`（表达式节点）
+* `columnIdentifier`（字段名节点）
+* `tableIdentifier`（表名节点）
+
+字段名与表名在 grammar 中是分开的，不是 “table.field” 那种结构。
 
 ---
 
-# ✅ 一、为什么你的项目里找不到 `ColumnExprDotContext`、`ColumnExprFieldContext`？
+# ✅ 一、WHERE 字段所在的真实节点
 
-因为 **你项目里的 ClickHouseLexer.g4 / ClickHouseParser.g4 文件并不是官方语法文件**。
+在 ClickHouseParser.g4 中：
 
-ClickHouse 官方 ANTLR4 语法版本众多，多数第三方库使用的语法 *不一定包含 ColumnExprDot / ColumnExprField*。
+### 1. where 子句
 
-例如：
-
-| 语法来源               | ColumnExpr 是否拆分？                                                          |
-| ------------------ | ------------------------------------------------------------------------- |
-| ClickHouse JDBC 驱动 | **拆分了** Field、Dot 等                                                       |
-| 部分 GitHub 项目旧版语法   | **未拆分**，一个大 `columnExpr` 规则包括所有情况                                         |
-| 你的版本（常见）           | **columnExprList、columnExprLiteral、columnExprFunction…** 等等，但没有 Dot/Field |
-
-所以你找不到是正常的，需要先确认你语法里的实际结构。
-
----
-
-# ✅ 二、你的语法长什么样？（典型结构）
-
-根据你说的情况，你的 Parser 可能类似：
-
-```
-columnExpr
-    :   columnExprList
-    |   columnExprFunction
-    |   columnExprIdentifier
-    |   columnExprLiteral
-    |   ...
-```
-
-📌 **重点：字段一般是 columnExprIdentifier**
-
-例如：
-
-```
-columnExprIdentifier
-    : IDENTIFIER (DOT IDENTIFIER)*
-```
-
-很多语法把：
-
-```
-table.column
-```
-
-也归为一个整体：
-
-```
-columnExprIdentifier →  "table.column"
-```
-
-而不会生成 "Dot" 子节点。
-
----
-
-# ✅ 三、你应该如何提取 WHERE 子句中的字段？
-
-### ✨ 做法非常简单：
-
-只需要覆盖 `visitColumnExprIdentifier`
-
-```java
-@Override
-public Void visitColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
-    String text = ctx.getText();   // 如 "a" 或 "table.a"
-    fields.add(text);
-    return null;
-}
-```
-
-如果你希望拆分 `表.字段`：
-
-```java
-String raw = ctx.getText(); // table.column
-String[] parts = raw.split("\\.");
-if (parts.length == 2) {
-    tableNames.add(parts[0]);
-    fields.add(parts[1]);
-} else {
-    fields.add(raw);
-}
-```
-
----
-
-# ✅ 四、WHERE 子句如何进入？
-
-语法一般包含：
-
-```
+```g4
 whereClause
     : WHERE columnExpr
+    ;
 ```
 
-你可通过：
+### 2. columnExpr（字段、函数、操作符等全部从这里开始）
+
+字段名不会是 `ColumnExprDot`，而是：
+
+### 3. ClickHouse 字段标识符节点（重点）
+
+```g4
+columnIdentifier
+    : identifier (DOT identifier)*
+    ;
+```
+
+也就是说，你要找的结构是：
+
+* `columnIdentifier()`
+* 它可能是：
+
+  * `a`
+  * `t.a`
+  * `db.t.a`
+
+---
+
+# ✅ 二、只用 Listener 提取 WHERE 字段名（无需修改语法）
+
+你可以监听：
+
+1. **进入 WHERE 子句**
+2. 在 WHERE 子句内部扫描 `columnIdentifier`
+
+---
+
+## ⭐ 最推荐实现：自定义 Listener（不改语法）
+
+### 新建一个类 `WhereFieldExtractor.java`
 
 ```java
-@Override
-public Void visitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
-    return visit(ctx.columnExpr());
-}
-```
+public class WhereFieldExtractor extends ClickHouseParserBaseListener {
 
-确保遍历 where 内部所有表达式。
-
----
-
-# ✅ 五、是否需要修改 ClickHouseParser.g4？
-
-❌ **大多数情况下，不需要修改！**
-
-原因：
-
-* 字段解析已经在 `columnExprIdentifier` 中
-* 不需要额外拆分 Dot 结构
-* 修改 g4 会增加维护成本，并需要重新生成 Lexer/Parser
-
-只有以下情况才需要修改语法：
-
-* 你必须区分表名和字段名（例如需要 lineage）
-* 你希望为 Dot 结构单独定义规则
-
-目前来看，**你完全不需要修改语法文件**。
-
----
-
-# ✅ 六、你想找的 visitor 方法列表怎么查看？
-
-如果你不知道应该重写哪些，可以查看：
-
-```
-target/generated-sources/antlr4/ClickHouseParserBaseVisitor.java
-```
-
-里面有所有 `visitXxx` 的方法。
-
-你看到只有：
-
-```
-visitColumnExprList
-visitColumnExprFunction
-visitColumnExprIdentifier
-...
-```
-
-说明 *你的语法就是这么设计的*，没有其他 Dot 类别的方法。
-
----
-
-# ✅ 七、完整示例：提取 WHERE 字段
-
-```java
-public class FieldVisitor extends ClickHouseParserBaseVisitor<Void> {
-
-    private Set<String> fields = new HashSet<>();
-
-    @Override
-    public Void visitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
-        return visit(ctx.columnExpr());
-    }
-
-    @Override
-    public Void visitColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
-        String raw = ctx.getText();
-        fields.add(raw);  // table.column 或 column
-        return null;
-    }
+    private boolean inWhere = false;
+    private final Set<String> fields = new HashSet<>();
 
     public Set<String> getFields() {
         return fields;
     }
+
+    @Override
+    public void enterWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+        inWhere = true;
+    }
+
+    @Override
+    public void exitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+        inWhere = false;
+    }
+
+    @Override
+    public void enterColumnIdentifier(ClickHouseParser.ColumnIdentifierContext ctx) {
+        if (inWhere) {
+            // 字段可能是 a 或 t.a 或 db.t.a
+            String field = ctx.getText();
+            fields.add(field);
+        }
+    }
 }
 ```
 
-调用：
+---
+
+# ✅ 三、使用方式（核心代码）
 
 ```java
-FieldVisitor visitor = new FieldVisitor();
-visitor.visit(parseTree);
-System.out.println(visitor.getFields());
+public static Set<String> extractWhereFields(String sql) {
+    ClickHouseLexer lexer = new ClickHouseLexer(CharStreams.fromString(sql));
+    ClickHouseParser parser = new ClickHouseParser(new CommonTokenStream(lexer));
+
+    ParseTree tree = parser.selectUnionStmt();
+
+    WhereFieldExtractor listener = new WhereFieldExtractor();
+    ParseTreeWalker.DEFAULT.walk(listener, tree);
+
+    return listener.getFields();
+}
 ```
 
 ---
 
-# ✅ 八、如果你需要，我可以帮你解析你手头的 g4 文件
+# ✅ 四、示例
 
-你可以把：
+SQL：
 
-* ClickHouseLexer.g4
-* ClickHouseParser.g4
+```sql
+SELECT name FROM t WHERE age > 10 AND user.city = 'SZ'
+```
 
-发给我，我可以：
+得到的字段集合：
 
-✔ 分析你语法中字段表达式的实际规则
-✔ 精准告诉你重写哪个 visit 方法
-✔ 如有必要，帮你补充 Dot 表达式解析
+```
+age
+user.city
+```
 
 ---
 
-如果你愿意，现在可以把 **columnExpr、columnExprIdentifier** 的 g4 片段贴给我，我可以立即确认你字段出现在哪个节点。
+# ❗ 为什么你找不到 ColumnExprDot / ColumnExprField？
+
+因为 **ClickHouse 官方 grammar 并不存在这些节点**，而是：
+
+* 表达式：`columnExpr`
+* 字段：`columnIdentifier`
+* 标识符：`identifier`
+
+字段的“点号结构（a.b.c）”实际由 `identifier (DOT identifier)*` 组成，而不是 Visitor 自动拆成 Dot 节点。
+
+---
+
+# ✅ 五、如果你想提取所有表名 + 字段名（可选）
+
+监听 `enterTableIdentifier`：
+
+```java
+@Override
+public void enterTableIdentifier(ClickHouseParser.TableIdentifierContext ctx) {
+    if (inWhere) {
+        System.out.println("表名: " + ctx.getText());
+    }
+}
+```
+
+---
+
+# 🏁 总结
+
+### 只使用 Listener 提取 WHERE 字段：
+
+✔ 监听 `enterWhereClause / exitWhereClause`
+✔ 监听 `enterColumnIdentifier`
+✔ 获取 `ctx.getText()` 即可
+
+不需要修改原有 .g4 文件，不需要 Visitor，不需要 ColumnExprDot。
+
+---
+
+如果你愿意，我可以：
+
+📌 **给你封装成 Spring Bean**
+📌 **给你编写单元测试 demo**
+📌 **根据你的业务封装成工具类**
+
+要不要我帮你把整个提取工具封成一个 `WhereFieldUtils.java`？
