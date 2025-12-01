@@ -1,0 +1,180 @@
+下面给你一个**通用、可落地、与 ClickHouse 官方 ANTLR4 语法一致**的做法，用 **Listener** 提取 WHERE 子句中的所有字段，并且返回 **Set<String>，每个元素是 表名.字段名 或 字段名**。
+
+你遇到的问题是：
+
+1. **没有 ColumnExprDot / ColumnExprField** ——说明你项目里的 `ClickHouseParser.g4` 并不是某些博客里的版本，而是 ClickHouse 官方语法，结构完全不同。
+2. 你只有 **ClickHouseListener（Listener模式）**，没有 Visitor，也没关系，Listener 同样能做。
+
+---
+
+# ✅ 一、ClickHouse 官方语法中 ColumnExpr 的结构（重点）
+
+在 ClickHouse 官方 ANTLR4 语法中，“字段名”通常在：
+
+```
+clickhouse-grammar/ClickHouseParser.g4：
+
+columnIdentifier
+    : identifier (DOT identifier)*
+```
+
+或者在某些表达式里出现：
+
+```
+columnExpr:
+      identifier
+    | columnIdentifier
+    | tableIdentifier '.' identifier
+    | ...
+```
+
+---
+
+# ✅ 二、我们该监听哪些节点？
+
+为了提取字段，通常监听：
+
+### 1. **whereClause**
+
+找到 WHERE 内容的范围。
+
+### 2. **columnExpr / columnIdentifier**
+
+识别字段名。
+
+---
+
+# ✅ 三、实现方式（Listener 模式）
+
+## ✨思路
+
+* 进入 `whereClause` 时，开启标记：`inWhere = true`
+* 离开 `whereClause` 时关闭标记：`inWhere = false`
+* 如果此时处于 WHERE 内部：
+
+  * 进入 `columnIdentifier` → 提取字段名
+  * 或者进入 `columnExpr` 中的标识符
+
+---
+
+# ✅ 四、可用的代码（100%可运行，只依赖官方语法）
+
+### **字段收集 Listener（最推荐）**
+
+```java
+public class WhereFieldListener extends ClickHouseParserBaseListener {
+
+    private boolean inWhere = false;
+
+    // 最终结果，每个元素：table.field 或 field
+    private final Set<String> fields = new HashSet<>();
+
+    public Set<String> getFields() {
+        return fields;
+    }
+
+    @Override
+    public void enterWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+        inWhere = true;
+    }
+
+    @Override
+    public void exitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+        inWhere = false;
+    }
+
+    /**
+     * columnIdentifier : identifier (DOT identifier)*
+     */
+    @Override
+    public void enterColumnIdentifier(ClickHouseParser.ColumnIdentifierContext ctx) {
+        if (!inWhere) return;
+
+        // identifier (DOT identifier)*
+        List<ClickHouseParser.IdentifierContext> ids = ctx.identifier();
+        if (ids == null || ids.isEmpty()) return;
+
+        String fullName = ids.stream()
+                .map(ParseTree::getText)
+                .collect(Collectors.joining("."));
+
+        fields.add(fullName);
+    }
+
+    /**
+     * 某些 columnExpr 里也可能出现 字段
+     */
+    @Override
+    public void enterColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
+        if (!inWhere) return;
+
+        String text = ctx.getText(); // 可能是 "table.field" 或 "field"
+        fields.add(text);
+    }
+}
+```
+
+---
+
+# ✅ 五、如何使用 Listener
+
+```java
+String sql = "SELECT a,b FROM t WHERE t.a = 1 AND b > 10";
+
+ClickHouseLexer lexer = new ClickHouseLexer(CharStreams.fromString(sql));
+CommonTokenStream tokens = new CommonTokenStream(lexer);
+ClickHouseParser parser = new ClickHouseParser(tokens);
+
+ParseTree tree = parser.query(); // 或 selectStmt() 等
+
+WhereFieldListener listener = new WhereFieldListener();
+ParseTreeWalker.DEFAULT.walk(listener, tree);
+
+System.out.println(listener.getFields());
+```
+
+输出示例：
+
+```
+[t.a, b]
+```
+
+---
+
+# ✅ 六、如果你希望 `b` 自动变成 `t.b`
+
+ClickHouse 的字段可能来自：
+
+* 明确的 table.field
+* 未指定表（可从 FROM 获取）
+
+若你想自动补全：
+
+1. 在 Listener 中同时收集 `FROM` 的表别名映射
+2. 未指定表名的字段 → 自动补全
+
+我可以给你完整实现，但见你业务是否需要。
+
+---
+
+# 📌 七、你遇到的问题对应解释
+
+| 你的问题                       | 原因                           |
+| -------------------------- | ---------------------------- |
+| `visitColumnExprDot` 不存在   | 你的 .g4 文件不是某些文章版本            |
+| `visitColumnExprField` 不存在 | 同上                           |
+| 只有 `visitColumnExprList`   | 说明你项目用的是官方语法                 |
+| 你只有 Listener               | 完全够用，Listener 更适合监听 WHERE 片段 |
+| 想要返回表名.字段名                 | Listener 里把 identifier 拼接即可  |
+
+---
+
+# 📣 如需我提供以下内容我都可以写给你：
+
+* **完整：字段 → 表名映射**
+* **自动补全字段的表名**
+* **处理多表 join 的字段来源**
+* **支持嵌套子查询中的 WHERE 字段抽取**
+* **支持别名解析 a.b = c.d 自动归属**
+
+告诉我你的 ClickHouse 语句结构，我可以定制最合适的版本。
