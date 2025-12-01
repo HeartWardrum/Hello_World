@@ -1,0 +1,159 @@
+要在现有项目里 **使用 ANTLR4 解析 ClickHouse 查询语句，并从 WHERE 子句中提取所有字段名**，你需要根据项目现状选择 **“修改原语法文件”** 或 **“添加自定义 Listener/Visitor 文件”**。
+
+结论非常明确：
+
+# ✅ **绝大多数情况下：不需要修改 ClickHouseLexer.g4 和 ClickHouseParser.g4**
+
+你应该 **新增一个 Visitor 或 Listener 文件**，在 WHERE 子句节点上收集字段。
+
+---
+
+# 为什么不建议改 Parser/Lexer？
+
+因为：
+
+* ClickHouse 官方语法文件非常复杂，任何修改都可能导致解析异常。
+* 你只需要“利用 AST”，不需要改变语法结构。
+* 自定义 Visitor 是 ANTLR 的通用方式，用来从语法树提取信息。
+
+👉 所以正确做法是：**新增文件解析 WHERE 子句提取字段**。
+
+---
+
+# 📌 推荐结构（新增文件即可）
+
+目录结构示例：
+
+```
+src/main/antlr/
+    ClickHouseLexer.g4
+    ClickHouseParser.g4
+
+src/main/java/
+    parser/
+       ClickHouseWhereFieldVisitor.java   ← 新增这个
+       ClickHouseParserUtil.java          ← 可选
+```
+
+---
+
+# ✨ 如何编写 Visitor 提取 WHERE 字段
+
+## 1. 首先生成 ANTLR 解析器（如果还没生成）
+
+```bash
+antlr4 ClickHouseLexer.g4 ClickHouseParser.g4 -visitor -package com.xxx.clickhouse.parser
+```
+
+---
+
+## 2. 新增一个 Visitor 文件（核心）
+
+### **ClickHouseWhereFieldVisitor.java**
+
+```java
+import java.util.*;
+import com.xxx.clickhouse.parser.ClickHouseParser;
+import com.xxx.clickhouse.parser.ClickHouseParserBaseVisitor;
+
+public class ClickHouseWhereFieldVisitor extends ClickHouseParserBaseVisitor<Void> {
+
+    private final Set<String> fields = new HashSet<>();
+
+    public Set<String> getFields() {
+        return fields;
+    }
+
+    @Override
+    public Void visitColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
+        // ctx.identifier() -> 字段名
+        fields.add(ctx.getText());
+        return null;
+    }
+
+    @Override
+    public Void visitColumnExprDot(ClickHouseParser.ColumnExprDotContext ctx) {
+        // 表.字段 结构
+        fields.add(ctx.getText());
+        return null;
+    }
+}
+```
+
+---
+
+# ✨ 如何调用解析 where 完整流程（Java）
+
+示例：解析一句 SQL：
+
+```java
+String sql = "SELECT a, b FROM table1 WHERE (age > 10 AND name = 'x') OR city = 'bj'";
+```
+
+完整代码：
+
+```java
+public static Set<String> parseWhereFields(String sql) {
+    ClickHouseLexer lexer = new ClickHouseLexer(CharStreams.fromString(sql));
+    CommonTokenStream tokens = new CommonTokenStream(lexer);
+    ClickHouseParser parser = new ClickHouseParser(tokens);
+
+    ClickHouseParser.QueryContext query = parser.query();
+
+    ClickHouseParser.WhereClauseContext where = query.whereClause();
+
+    if (where == null) {
+        return Collections.emptySet();
+    }
+
+    ClickHouseWhereFieldVisitor visitor = new ClickHouseWhereFieldVisitor();
+    visitor.visit(where);
+
+    return visitor.getFields();
+}
+```
+
+输出示例：
+
+```
+["age", "name", "city"]
+```
+
+---
+
+# ❓那么什么时候要修改 ClickHouseLexer.g4 / Parser.g4？
+
+仅当：
+
+* 你需要支持 ClickHouse 语法文件未覆盖的新功能
+* 比如新语法、新关键字、新函数
+* 或者 ClickHouseParser 版本较旧，缺少某些规则
+
+这种情况你才应该修改语法文件。
+
+否则 **完全不需要动它们**。
+
+---
+
+# 📌 最终结论
+
+| 需求            | 是否需要修改 g4 文件    |
+| ------------- | --------------- |
+| 解析 WHERE 子句字段 | ❌ 不需要           |
+| 添加新语法         | ✔ 可能需要          |
+| 修复语法 bug      | ✔ 可能需要          |
+| 单纯提取列名        | ❌ 新增 Visitor 即可 |
+
+👉 **你的需求（提取字段）属于“新增 Visitor”即可完成。**
+
+---
+
+如果你愿意，我可以：
+
+✔ 替你写完整可运行的 Maven 项目结构
+✔ 写完整工具类 + 测试代码
+✔ 实现“递归处理表达式”版本
+✔ 实现“去掉函数参数内字段”版本
+✔ 实现“带表别名解析的字段树”版本
+
+需要哪个？
