@@ -1,159 +1,205 @@
-要在现有项目里 **使用 ANTLR4 解析 ClickHouse 查询语句，并从 WHERE 子句中提取所有字段名**，你需要根据项目现状选择 **“修改原语法文件”** 或 **“添加自定义 Listener/Visitor 文件”**。
-
-结论非常明确：
-
-# ✅ **绝大多数情况下：不需要修改 ClickHouseLexer.g4 和 ClickHouseParser.g4**
-
-你应该 **新增一个 Visitor 或 Listener 文件**，在 WHERE 子句节点上收集字段。
+下面我帮你**彻底搞清楚 ClickHouse 的 ANTLR4 语法结构、为什么找不到 ColumnExprDot / ColumnExprField、应该如何扩展现有语法来提取 WHERE 子句字段**。
 
 ---
 
-# 为什么不建议改 Parser/Lexer？
+# ✅ 一、为什么你的项目里找不到 `ColumnExprDotContext`、`ColumnExprFieldContext`？
 
-因为：
+因为 **你项目里的 ClickHouseLexer.g4 / ClickHouseParser.g4 文件并不是官方语法文件**。
 
-* ClickHouse 官方语法文件非常复杂，任何修改都可能导致解析异常。
-* 你只需要“利用 AST”，不需要改变语法结构。
-* 自定义 Visitor 是 ANTLR 的通用方式，用来从语法树提取信息。
+ClickHouse 官方 ANTLR4 语法版本众多，多数第三方库使用的语法 *不一定包含 ColumnExprDot / ColumnExprField*。
 
-👉 所以正确做法是：**新增文件解析 WHERE 子句提取字段**。
+例如：
+
+| 语法来源               | ColumnExpr 是否拆分？                                                          |
+| ------------------ | ------------------------------------------------------------------------- |
+| ClickHouse JDBC 驱动 | **拆分了** Field、Dot 等                                                       |
+| 部分 GitHub 项目旧版语法   | **未拆分**，一个大 `columnExpr` 规则包括所有情况                                         |
+| 你的版本（常见）           | **columnExprList、columnExprLiteral、columnExprFunction…** 等等，但没有 Dot/Field |
+
+所以你找不到是正常的，需要先确认你语法里的实际结构。
 
 ---
 
-# 📌 推荐结构（新增文件即可）
+# ✅ 二、你的语法长什么样？（典型结构）
 
-目录结构示例：
+根据你说的情况，你的 Parser 可能类似：
 
 ```
-src/main/antlr/
-    ClickHouseLexer.g4
-    ClickHouseParser.g4
-
-src/main/java/
-    parser/
-       ClickHouseWhereFieldVisitor.java   ← 新增这个
-       ClickHouseParserUtil.java          ← 可选
+columnExpr
+    :   columnExprList
+    |   columnExprFunction
+    |   columnExprIdentifier
+    |   columnExprLiteral
+    |   ...
 ```
+
+📌 **重点：字段一般是 columnExprIdentifier**
+
+例如：
+
+```
+columnExprIdentifier
+    : IDENTIFIER (DOT IDENTIFIER)*
+```
+
+很多语法把：
+
+```
+table.column
+```
+
+也归为一个整体：
+
+```
+columnExprIdentifier →  "table.column"
+```
+
+而不会生成 "Dot" 子节点。
 
 ---
 
-# ✨ 如何编写 Visitor 提取 WHERE 字段
+# ✅ 三、你应该如何提取 WHERE 子句中的字段？
 
-## 1. 首先生成 ANTLR 解析器（如果还没生成）
+### ✨ 做法非常简单：
 
-```bash
-antlr4 ClickHouseLexer.g4 ClickHouseParser.g4 -visitor -package com.xxx.clickhouse.parser
-```
-
----
-
-## 2. 新增一个 Visitor 文件（核心）
-
-### **ClickHouseWhereFieldVisitor.java**
+只需要覆盖 `visitColumnExprIdentifier`
 
 ```java
-import java.util.*;
-import com.xxx.clickhouse.parser.ClickHouseParser;
-import com.xxx.clickhouse.parser.ClickHouseParserBaseVisitor;
+@Override
+public Void visitColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
+    String text = ctx.getText();   // 如 "a" 或 "table.a"
+    fields.add(text);
+    return null;
+}
+```
 
-public class ClickHouseWhereFieldVisitor extends ClickHouseParserBaseVisitor<Void> {
+如果你希望拆分 `表.字段`：
 
-    private final Set<String> fields = new HashSet<>();
+```java
+String raw = ctx.getText(); // table.column
+String[] parts = raw.split("\\.");
+if (parts.length == 2) {
+    tableNames.add(parts[0]);
+    fields.add(parts[1]);
+} else {
+    fields.add(raw);
+}
+```
 
-    public Set<String> getFields() {
-        return fields;
+---
+
+# ✅ 四、WHERE 子句如何进入？
+
+语法一般包含：
+
+```
+whereClause
+    : WHERE columnExpr
+```
+
+你可通过：
+
+```java
+@Override
+public Void visitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+    return visit(ctx.columnExpr());
+}
+```
+
+确保遍历 where 内部所有表达式。
+
+---
+
+# ✅ 五、是否需要修改 ClickHouseParser.g4？
+
+❌ **大多数情况下，不需要修改！**
+
+原因：
+
+* 字段解析已经在 `columnExprIdentifier` 中
+* 不需要额外拆分 Dot 结构
+* 修改 g4 会增加维护成本，并需要重新生成 Lexer/Parser
+
+只有以下情况才需要修改语法：
+
+* 你必须区分表名和字段名（例如需要 lineage）
+* 你希望为 Dot 结构单独定义规则
+
+目前来看，**你完全不需要修改语法文件**。
+
+---
+
+# ✅ 六、你想找的 visitor 方法列表怎么查看？
+
+如果你不知道应该重写哪些，可以查看：
+
+```
+target/generated-sources/antlr4/ClickHouseParserBaseVisitor.java
+```
+
+里面有所有 `visitXxx` 的方法。
+
+你看到只有：
+
+```
+visitColumnExprList
+visitColumnExprFunction
+visitColumnExprIdentifier
+...
+```
+
+说明 *你的语法就是这么设计的*，没有其他 Dot 类别的方法。
+
+---
+
+# ✅ 七、完整示例：提取 WHERE 字段
+
+```java
+public class FieldVisitor extends ClickHouseParserBaseVisitor<Void> {
+
+    private Set<String> fields = new HashSet<>();
+
+    @Override
+    public Void visitWhereClause(ClickHouseParser.WhereClauseContext ctx) {
+        return visit(ctx.columnExpr());
     }
 
     @Override
     public Void visitColumnExprIdentifier(ClickHouseParser.ColumnExprIdentifierContext ctx) {
-        // ctx.identifier() -> 字段名
-        fields.add(ctx.getText());
+        String raw = ctx.getText();
+        fields.add(raw);  // table.column 或 column
         return null;
     }
 
-    @Override
-    public Void visitColumnExprDot(ClickHouseParser.ColumnExprDotContext ctx) {
-        // 表.字段 结构
-        fields.add(ctx.getText());
-        return null;
+    public Set<String> getFields() {
+        return fields;
     }
 }
 ```
 
----
-
-# ✨ 如何调用解析 where 完整流程（Java）
-
-示例：解析一句 SQL：
+调用：
 
 ```java
-String sql = "SELECT a, b FROM table1 WHERE (age > 10 AND name = 'x') OR city = 'bj'";
-```
-
-完整代码：
-
-```java
-public static Set<String> parseWhereFields(String sql) {
-    ClickHouseLexer lexer = new ClickHouseLexer(CharStreams.fromString(sql));
-    CommonTokenStream tokens = new CommonTokenStream(lexer);
-    ClickHouseParser parser = new ClickHouseParser(tokens);
-
-    ClickHouseParser.QueryContext query = parser.query();
-
-    ClickHouseParser.WhereClauseContext where = query.whereClause();
-
-    if (where == null) {
-        return Collections.emptySet();
-    }
-
-    ClickHouseWhereFieldVisitor visitor = new ClickHouseWhereFieldVisitor();
-    visitor.visit(where);
-
-    return visitor.getFields();
-}
-```
-
-输出示例：
-
-```
-["age", "name", "city"]
+FieldVisitor visitor = new FieldVisitor();
+visitor.visit(parseTree);
+System.out.println(visitor.getFields());
 ```
 
 ---
 
-# ❓那么什么时候要修改 ClickHouseLexer.g4 / Parser.g4？
+# ✅ 八、如果你需要，我可以帮你解析你手头的 g4 文件
 
-仅当：
+你可以把：
 
-* 你需要支持 ClickHouse 语法文件未覆盖的新功能
-* 比如新语法、新关键字、新函数
-* 或者 ClickHouseParser 版本较旧，缺少某些规则
+* ClickHouseLexer.g4
+* ClickHouseParser.g4
 
-这种情况你才应该修改语法文件。
+发给我，我可以：
 
-否则 **完全不需要动它们**。
-
----
-
-# 📌 最终结论
-
-| 需求            | 是否需要修改 g4 文件    |
-| ------------- | --------------- |
-| 解析 WHERE 子句字段 | ❌ 不需要           |
-| 添加新语法         | ✔ 可能需要          |
-| 修复语法 bug      | ✔ 可能需要          |
-| 单纯提取列名        | ❌ 新增 Visitor 即可 |
-
-👉 **你的需求（提取字段）属于“新增 Visitor”即可完成。**
+✔ 分析你语法中字段表达式的实际规则
+✔ 精准告诉你重写哪个 visit 方法
+✔ 如有必要，帮你补充 Dot 表达式解析
 
 ---
 
-如果你愿意，我可以：
-
-✔ 替你写完整可运行的 Maven 项目结构
-✔ 写完整工具类 + 测试代码
-✔ 实现“递归处理表达式”版本
-✔ 实现“去掉函数参数内字段”版本
-✔ 实现“带表别名解析的字段树”版本
-
-需要哪个？
+如果你愿意，现在可以把 **columnExpr、columnExprIdentifier** 的 g4 片段贴给我，我可以立即确认你字段出现在哪个节点。
