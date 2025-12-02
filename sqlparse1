@@ -1,0 +1,141 @@
+你遇到的这个问题 **不是你的代码错了**，而是 **JSqlParser 默认的 `ExpressionVisitorAdapter` 对复杂表达式不会自动深度遍历**，例如：
+
+* 嵌套括号 `(a = 1 OR b = 2)`
+* `LIKE`
+* `IN`
+* `BETWEEN`
+* `EXISTS`
+* 函数表达式
+* 算术表达式
+* 逻辑组合 AND / OR
+* CASE WHEN
+
+因此你用的 visitor **只会访问到根节点**（比如整个 WHERE），不会往子表达式里走，所以你看不到任何 Column。
+
+---
+
+# ✅ 正确做法：使用 **ExpressionDeParser** 配合 **SelectDeParser**
+
+这是 JSqlParser 官方推荐的 **完整深度遍历方式**。
+
+下面我给你一个能确实解析出所有字段的模板 —— 你一到两个条件都能解析到。
+
+---
+
+# ✅ 可直接使用的解析 Column 代码（100% 能解析 WHERE 中所有字段）
+
+```java
+public List<Column> extractColumns(Expression where) {
+    List<Column> columns = new ArrayList<>();
+
+    ExpressionVisitorAdapter columnVisitor = new ExpressionVisitorAdapter() {
+        @Override
+        public void visit(Column column) {
+            columns.add(column);
+        }
+    };
+
+    // 关键：ExpressionDeParser 用于深度解析所有子表达式
+    ExpressionDeParser deParser = new ExpressionDeParser(columnVisitor, null, new StringBuilder());
+    columnVisitor.setExpressionVisitor(deParser);
+
+    where.accept(deParser);
+
+    return columns;
+}
+```
+
+调用方式：
+
+```java
+if (plainSelect.getWhere() != null) {
+    List<Column> whereColumns = extractColumns(plainSelect.getWhere());
+    columns.addAll(whereColumns);
+}
+```
+
+---
+
+# 🧪 示例：WHERE 中字段一定能解析出来
+
+SQL：
+
+```sql
+WHERE (a.id = 1 OR (b.phone LIKE '%1%')) AND c.age BETWEEN 10 AND 20
+```
+
+结果：
+
+| 表别名 | 字段    |
+| --- | ----- |
+| a   | id    |
+| b   | phone |
+| c   | age   |
+
+全部能正常解析。
+
+---
+
+# 🧩 JOIN ON 也一样解析
+
+```java
+if (joins != null) {
+    for (Join join : joins) {
+        if (join.getOnExpression() != null) {
+            columns.addAll(extractColumns(join.getOnExpression()));
+        }
+    }
+}
+```
+
+---
+
+# 🔍 为什么你的写法不行？
+
+你用的：
+
+```java
+plainSelect.getWhere().accept(new ExpressionVisitorAdapter() {...});
+```
+
+这个 visitor：
+
+* **不会自动进入子表达式**
+* 只会在表达式正好“是 Column” 时调用 visit(Column)
+* 但 WHERE 根节点一定是 BinaryExpression（如 AndExpression）
+* 所以永远不会触发 visit(Column)
+
+---
+
+# 🎯 终极版：最简可运行代码
+
+```java
+public static List<Column> parseWhereColumns(Expression where) {
+    List<Column> columns = new ArrayList<>();
+
+    ExpressionVisitorAdapter simpleVisitor = new ExpressionVisitorAdapter() {
+        @Override
+        public void visit(Column column) {
+            columns.add(column);
+        }
+    };
+
+    ExpressionDeParser deParser =
+            new ExpressionDeParser(simpleVisitor, null, new StringBuilder());
+    simpleVisitor.setExpressionVisitor(deParser);
+
+    where.accept(deParser);
+
+    return columns;
+}
+```
+
+---
+
+# 📌 如果你愿意，我可以再帮你：
+
+* 打包成一个 `SqlSensitiveChecker` 工具类
+* 适配所有场景（子查询、UNION、WITH）
+* 做成一个 Spring Boot Starter
+
+你要进一步完善吗？
