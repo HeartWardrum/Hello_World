@@ -1,0 +1,158 @@
+下面给你一个**通用、可用的套路**：
+假设你的 *ParseTree 是 ANTLR4*（你之前用 ClickHouseParser），你需要做的是：
+
+1. **遍历 parse tree（递归 or Visitor）**
+2. **找到 tableIdentifier / columnIdentifier / columnExpr**
+3. **拼成 表名.字段名（在能确定表名时）**
+
+下面给出两套你能直接用的方式：
+
+* **通用 ParseTree 遍历打印（任何语法都可用）**
+* **ClickHouse SQL：提取所有 表名.字段名 的正确写法**
+
+---
+
+# ✅ 一、最通用写法：递归遍历 ParseTree（打印全部节点文本）
+
+```java
+public static void printTree(ParseTree tree, Parser parser, int indent) {
+    String ruleName = parser.getRuleNames()[((RuleContext) tree).getRuleIndex()];
+    System.out.println(" ".repeat(indent) + ruleName + " -> " + tree.getText());
+
+    for (int i = 0; i < tree.getChildCount(); i++) {
+        printTree(tree.getChild(i), parser, indent + 2);
+    }
+}
+```
+
+使用：
+
+```java
+printTree(parseTree, parser, 0);
+```
+
+这只是**打印完整树结构**，方便你确认节点名称。
+
+---
+
+# ✅ 二、提取 SQL 里的 **表名.字段名**（你真正要的）
+
+由于你用的是 **ClickHouseParser**，里面字段来自：
+
+| 你需要的 | ClickHouse 语法里的可能节点         |
+| ---- | --------------------------- |
+| 表名   | tableExpr / tableIdentifier |
+| 字段名  | columnExpr / identifier     |
+| 表.字段 | tableExpr + columnExpr      |
+
+下面给出一个**可直接运行的 Java Visitor 版本**：
+（Listener 在 ClickHouseParser 下不好使，因为没有 enterColumnExpr 之类的方法）
+
+---
+
+# ✅ 三、Java Visitor：提取所有 `表名.字段名`
+
+```java
+public class ColumnCollectVisitor extends ClickHouseParserBaseVisitor<Void> {
+
+    // 最终结果
+    private final Set<String> fields = new HashSet<>();
+
+    // 当前 SQL 中正在使用的表别名映射，如：
+    //  ts.td  => td
+    private final Map<String, String> aliasToTable = new HashMap<>();
+
+    public Set<String> getFields() {
+        return fields;
+    }
+
+    // 进入 FROM / JOIN，把表与别名记录下来
+    @Override
+    public Void visitTableExpr(ClickHouseParser.TableExprContext ctx) {
+        // 表名
+        if (ctx.tableIdentifier() != null) {
+            String tableName = ctx.tableIdentifier().getText(); // 例如 ts.td
+
+            // 表别名（可选）
+            if (ctx.identifier() != null) {
+                String alias = ctx.identifier().getText();
+                aliasToTable.put(alias, tableName);
+            } else {
+                // 没别名，用最后一段当别名
+                String alias = tableName.contains(".")
+                        ? tableName.substring(tableName.lastIndexOf('.') + 1)
+                        : tableName;
+                aliasToTable.put(alias, tableName);
+            }
+        }
+
+        return super.visitTableExpr(ctx);
+    }
+
+    // 访问字段表达式
+    @Override
+    public Void visitColumnExpr(ClickHouseParser.ColumnExprContext ctx) {
+        String text = ctx.getText();  // 可能是：  td.id  / id
+
+        if (!text.contains(".")) {
+            return super.visitColumnExpr(ctx);
+        }
+
+        String[] parts = text.split("\\.");
+        if (parts.length == 2) {
+            String alias = parts[0];
+            String column = parts[1];
+
+            // 查别名 → 真表名
+            String tableName = aliasToTable.getOrDefault(alias, alias);
+
+            fields.add(tableName + "." + column);
+        }
+
+        return super.visitColumnExpr(ctx);
+    }
+}
+```
+
+---
+
+# ✅ 四、使用方法
+
+```java
+ColumnCollectVisitor visitor = new ColumnCollectVisitor();
+visitor.visit(parseTree);
+
+Set<String> result = visitor.getFields();
+result.forEach(System.out::println);
+```
+
+输出示例：
+
+```
+ts.td.id
+ts.td.name
+user.account.age
+```
+
+---
+
+# ✅ 五、常见坑（你之前遇到的）
+
+### ❌ 1. select a b from ts.td 导致 ts.td 被当成字段
+
+你之前的问题是 **你在 WHERE 或字段表达式中也拿到了 tableExpr**
+Visitor 方案通过 `visitColumnExpr` 解决了这个问题。
+
+### ❌ 2. 没有 enterColumnExpr / exitColumnExpr
+
+对的，ClickHouseParser grammar 不提供这些事件，只能用 Visitor。
+
+---
+
+# 如需要我可以帮你：
+
+* 把这段代码改成 Listener 版
+* 直接贴你的 SQL，帮你跑出正确提取结果
+* 根据你的 .g4 修改让它生成 enterColumnExpr
+
+你要继续哪个方向？
