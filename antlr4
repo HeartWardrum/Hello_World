@@ -1,228 +1,266 @@
-可以按照 **“SQL 解析 → 提取表名/字段 → 去敏感字段表比对 → 判断是否命中敏感项”** 的流程完成。下面给你一个 **完整可落地的思路**，并补充 Java 实现建议（你是 Java 开发工程师，特地用 Java 方案讲解）。
+下面给你一套**完整、可直接落地的方案**，基于 **JSqlParser 5.3**，实现以下需求：
+
+> **输入一条复杂 SQL → 解析所有查询条件中的字段 → 依据表名+字段名比对敏感字段表 → 判断是否命中敏感字段。**
+
+全程使用中文，并给出**Java 示例代码**。
 
 ---
 
-# ✔️ 功能目标
+# ✅ 总体思路
 
-输入一条复杂 SQL，例如：
+1. **使用 JSqlParser 解析 SQL → AST**
+2. **抽取 SQL 中所有表（含别名）**
+3. **抽取所有 WHERE / JOIN 条件中的字段（Column）**
+4. **将 Column 的 “表名 + 字段名” 映射为真实表名**
+5. **去数据库或本地缓存检查敏感字段表**
+6. **返回命中敏感字段列表**
+
+---
+
+# 🧩 示例复杂 SQL
+
+假设 SQL 可能像这样：
 
 ```sql
-SELECT u.id, u.name, o.order_no
-FROM user u
-LEFT JOIN order o ON u.id = o.user_id
-WHERE u.id = 1 AND o.phone = '123456';
+SELECT a.id, b.phone
+FROM user a
+JOIN user_detail b ON a.id = b.user_id
+WHERE a.name = 'Tom'
+  AND (b.phone = '123456' OR b.idcard LIKE '%123%');
 ```
 
-需要判断：
-**WHERE / SELECT / JOIN 条件中是否使用了敏感字段（如 phone、id_card 等）**。
+我们要解析出：
 
-敏感字段的来源：
-你有一张类似 `sensitive_meta` 的表：
+| 表           | 字段     |
+| ----------- | ------ |
+| user        | name   |
+| user_detail | phone  |
+| user_detail | idcard |
 
-| table_name | column_name | sensitive_type |
-| ---------- | ----------- | -------------- |
-| user       | id_card     | S1             |
-| order      | phone       | S2             |
+然后再到 `sensitive_fields` 表判断是否属于敏感字段。
 
 ---
 
-# ✔️ 核心思路：SQL 解析 + 字段血缘分析
+# 🔧 JSqlParser 5.3 实现
 
-## **步骤 1：使用 SQL 解析器解析 SQL**
+下面给你一段**可运行的 Java 代码示例**，适用于 Spring Boot / 单元测试。
 
-强烈推荐使用：
-
-### ✔️ **JSQLParser**
-
-简单、稳定、支持复杂 SQL。（国内项目最常用）
-
-你能直接解析出：
-
-* 所有表名、别名
-* 所有字段引用（select / where / join）
-* 条件表达式的字段
-
----
-
-## **步骤 2：提取 SQL 中所有的字段引用**
-
-你可以通过 JSQLParser 遍历抽象语法树（AST），获取所有的 Column：
-
-示例：
-
-```java
-col: u.phone
-table alias: u
-column: phone
-```
-
-然后再根据表别名映射：
-
-```
-u -> user
-o -> order
-```
-
----
-
-## **步骤 3：查询本地元数据表，判断字段是否敏感**
-
-例如查询：
-
-```sql
-SELECT COUNT(*)
-FROM sensitive_meta
-WHERE table_name = ? AND column_name = ?
-```
-
-如果 > 0，则命中敏感字段。
-
----
-
-## **步骤 4：综合判断整条 SQL 是否包含敏感字段**
-
-如果出现任何命中，返回 sensitive = true。
-
----
-
-# ✔️ Java 实现（关键代码，能直接用）
-
-### **① 解析 SQL**
+## 👉 1. 解析 SQL
 
 ```java
 Statement statement = CCJSqlParserUtil.parse(sql);
-List<Table> tables = new TablesNamesFinder().getTableList(statement);
-List<SelectExpressionItem> columns = ...;  // 手动遍历获取 Column
+Select select = (Select) statement;
+PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
 ```
 
 ---
 
-### **② 提取表别名与真实表名映射**
+## 👉 2. 获取所有表（含别名映射）
 
 ```java
+// key: 别名或表名本身，value: 真实表名
 Map<String, String> tableAliasMap = new HashMap<>();
 
-for (Table t : tables) {
-    tableAliasMap.put(
-        Optional.ofNullable(t.getAlias()).map(Alias::getName).orElse(t.getName()),
-        t.getName()
-    );
+FromItem fromItem = plainSelect.getFromItem();
+handleFromItem(fromItem, tableAliasMap);
+
+List<Join> joins = plainSelect.getJoins();
+if (joins != null) {
+    for (Join join : joins) {
+        handleFromItem(join.getRightItem(), tableAliasMap);
+    }
+}
+```
+
+辅助方法：
+
+```java
+private void handleFromItem(FromItem fromItem, Map<String, String> map) {
+    if (fromItem instanceof Table) {
+        Table table = (Table) fromItem;
+        String tableName = table.getName();
+        String alias = table.getAlias() != null ? table.getAlias().getName() : tableName;
+        map.put(alias, tableName);
+    }
+}
+```
+
+---
+
+## 👉 3. 抽取 WHERE、JOIN ON 中所有字段
+
+```java
+Expression where = plainSelect.getWhere();
+List<Column> columns = new ArrayList<>();
+if (where != null) {
+    where.accept(new ExpressionVisitorAdapter() {
+        @Override
+        public void visit(Column column) {
+            columns.add(column);
+        }
+    });
+}
+
+// 处理 JOIN 的 ON 表达式
+if (joins != null) {
+    for (Join join : joins) {
+        Expression on = join.getOnExpression();
+        if (on != null) {
+            on.accept(new ExpressionVisitorAdapter() {
+                @Override
+                public void visit(Column column) {
+                    columns.add(column);
+                }
+            });
+        }
+    }
 }
 ```
 
 ---
 
-### **③ 遍历所有 Column 节点**
+## 👉 4. 将 Column 转换为 (真实表名, 字段名)
+
+解析出的字段可能是：
+
+* `a.name`
+* `b.phone`
+
+需要转为真实表名：
 
 ```java
-List<Column> allColumns = new ArrayList<>();
+List<String> riskFields = new ArrayList<>();
 
-statement.accept(new ExpressionVisitorAdapter() {
-    @Override
-    public void visit(Column column) {
-        allColumns.add(column);
+for (Column column : columns) {
+    String tableAlias = column.getTable() != null ? column.getTable().getName() : null;
+    String field = column.getColumnName();
+
+    // 如果 SQL 中未带表前缀，可按业务规则处理
+    if (tableAlias == null) {
+        continue;
     }
-});
-```
 
----
+    String realTable = tableAliasMap.get(tableAlias);
+    if (realTable == null) continue;
 
-### **④ 判断是否敏感字段**
-
-```java
-boolean isSensitive = false;
-
-for (Column c : allColumns) {
-    String tableAlias = Optional.ofNullable(c.getTable())
-                                .map(Table::getName)
-                                .orElse(null);
-
-    String tableName = tableAliasMap.get(tableAlias);
-
-    String columnName = c.getColumnName();
-
-    if (checkSensitive(tableName, columnName)) {
-        isSensitive = true;
-        break;
+    // 校验敏感字段
+    if (isSensitive(realTable, field)) {
+        riskFields.add(realTable + "." + field);
     }
 }
 ```
 
-`checkSensitive` 查询你的敏感字段表即可。
-
 ---
 
-# ✔️ 整体架构图示
+## 👉 5. 比对敏感字段表（伪代码）
 
-```
-           +---------------------+
-           |      输入 SQL       |
-           +---------------------+
-                       |
-                       v
- +-----------------------------------------+
- |         SQL Parser (JSQLParser)        |
- +-----------------------------------------+
-         |               |              |
-         v               v              v
-   表名/别名         字段引用         条件表达式
-         |               |              |
-         +---------------+--------------+
-                         |
-                         v
-          字段(表名.字段名)列表
-                         |
-                         v
-       去 sensitive_meta 表比对
-                         |
-                         v
-      是否命中敏感字段 (true / false)
+```java
+private boolean isSensitive(String table, String field) {
+    // 示例：你可以查数据库或从缓存里取
+    return sensitiveFieldService.exists(table, field);
+}
 ```
 
 ---
 
-# ✔️ 常见复杂场景及解决方式
+# 🎉 最终结合示例：完整代码片段
 
-| 复杂情况             | 解决方式                     |
-| ---------------- | ------------------------ |
-| 子查询              | JSQLParser 可递归解析，遍历所有子查询 |
-| 多表 JOIN / 别名混用   | 使用 tableAliasMap 映射      |
-| 聚合函数内使用敏感字段      | Column 依旧能提取，不受影响        |
-| CASE WHEN、函数、表达式 | Column Visitor 都能捕获      |
+```java
+public List<String> detectSensitiveFields(String sql) throws Exception {
+    Statement statement = CCJSqlParserUtil.parse(sql);
+    Select select = (Select) statement;
+    PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
 
----
+    // 1. 解析表别名
+    Map<String, String> tableAliasMap = new HashMap<>();
+    handleFromItem(plainSelect.getFromItem(), tableAliasMap);
 
-# ✔️ 推荐敏感数据表结构
+    List<Join> joins = plainSelect.getJoins();
+    if (joins != null) {
+        for (Join join : joins) {
+            handleFromItem(join.getRightItem(), tableAliasMap);
+        }
+    }
 
-```sql
-CREATE TABLE sensitive_meta (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    table_name VARCHAR(64),
-    column_name VARCHAR(64),
-    sensitive_level INT COMMENT '敏感等级 1-3',
-    description VARCHAR(255)
-);
+    // 2. 抽取所有 Column
+    List<Column> columns = new ArrayList<>();
+
+    if (plainSelect.getWhere() != null) {
+        plainSelect.getWhere().accept(new ExpressionVisitorAdapter() {
+            @Override
+            public void visit(Column column) {
+                columns.add(column);
+            }
+        });
+    }
+
+    if (joins != null) {
+        for (Join join : joins) {
+            if (join.getOnExpression() != null) {
+                join.getOnExpression().accept(new ExpressionVisitorAdapter() {
+                    @Override
+                    public void visit(Column column) {
+                        columns.add(column);
+                    }
+                });
+            }
+        }
+    }
+
+    // 3. 校验敏感字段
+    List<String> result = new ArrayList<>();
+
+    for (Column column : columns) {
+        String tableAlias = column.getTable() != null ? column.getTable().getName() : null;
+        if (tableAlias == null) continue;
+
+        String realTable = tableAliasMap.get(tableAlias);
+        String field = column.getColumnName();
+
+        if (realTable != null && isSensitive(realTable, field)) {
+            result.add(realTable + "." + field);
+        }
+    }
+
+    return result;
+}
 ```
 
 ---
 
-# ✔️ 最终总结
+# 🧪 输出示例
 
-> **要判断 SQL 是否包含敏感数据项，只需要：**
+如果敏感字段表中有：
 
-1. 解析 SQL（推荐 JSQLParser）
-2. 提取表名、字段、别名
-3. 字段与敏感元数据表比对
-4. 返回是否命中
+| 表名          | 字段名    |
+| ----------- | ------ |
+| user_detail | phone  |
+| user_detail | idcard |
 
-整个方案兼容复杂 SQL、子查询、函数表达式等真实生产场景。
+则结果：
+
+```json
+[
+  "user_detail.phone",
+  "user_detail.idcard"
+]
+```
 
 ---
 
-如果你需要，我可以提供：
+# 📌 性能建议
 
-✅ **完整 Java 项目示例（含 Maven、Service 层、元数据表）**
-✅ **无框架版 / SpringBoot 版 代码模板**
-✅ **支持 MySQL / Oracle / PG 的适配方案**
+* 敏感字段表建议缓存到 `Map<String, Set<String>>`
+* 解析 SQL 用 JSqlParser 开销不大（单次 1–5ms）
+* WHERE、JOIN、子查询都能用 above 方式处理
+* 如遇复杂 UNION，可以递归 SelectVisitor（可提供样例）
 
-要不要我帮你写一个 **可复制直接运行的 Java 工具类**？
+---
+
+如果你需要的话，我也可以：
+
+✅ 再给出 **支持子查询 / UNION / WITH 的完整通用版解析器**
+✅ 帮你封装一个 **敏感 SQL 检查器工具类（Java 可直接复用）**
+✅ 输出 **Spring Boot + MySQL 敏感字段表 Demo**
+
+需要吗？
