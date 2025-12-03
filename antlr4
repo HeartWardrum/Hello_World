@@ -1,266 +1,204 @@
-下面给你一套**完整、可直接落地的方案**，基于 **JSqlParser 5.3**，实现以下需求：
-
-> **输入一条复杂 SQL → 解析所有查询条件中的字段 → 依据表名+字段名比对敏感字段表 → 判断是否命中敏感字段。**
-
-全程使用中文，并给出**Java 示例代码**。
+下面给你一个**可直接上手的思路和示例**，使用 **ANTLR 4.13.2** 对 SQL 语句进行解析，然后判断查询条件（WHERE 子句）中是否包含敏感数据项。
 
 ---
 
 # ✅ 总体思路
 
-1. **使用 JSqlParser 解析 SQL → AST**
-2. **抽取 SQL 中所有表（含别名）**
-3. **抽取所有 WHERE / JOIN 条件中的字段（Column）**
-4. **将 Column 的 “表名 + 字段名” 映射为真实表名**
-5. **去数据库或本地缓存检查敏感字段表**
-6. **返回命中敏感字段列表**
+1. **使用 ANTLR4 解析 SQL**
+   可以用官方的 **TSQL / MySQL / PL/SQL / PostgreSQL** 语法（GitHub 现成），或只根据你的场景定制一个简化版 SQL 语法。
+
+2. **编写 Listener / Visitor**
+   重点监听：
+
+   * 比较表达式：`col = xxx`
+   * 字段引用：`columnName`
+   * 条件组合：`AND / OR`
+
+3. **敏感字段列表**（例如）
+
+   ```java
+   Set<String> sensitiveColumns = Set.of("id_card", "mobile", "email", "bank_no");
+   ```
+
+4. **在解析树中检查 WHERE 子句**是否使用了敏感字段。
 
 ---
 
-# 🧩 示例复杂 SQL
+# ✅ 方案示例（ANTLR4 + Java）
 
-假设 SQL 可能像这样：
+下面是一个**可运行的最小化解决方案**，适合你的场景判断 SQL 是否包含敏感字段。
+
+---
+
+# 1️⃣ ANTLR4 语法（简化 SQL）
+
+文件名：`SimpleSql.g4`
+
+```antlr
+grammar SimpleSql;
+
+parse
+    : selectStmt EOF
+    ;
+
+selectStmt
+    : SELECT selectElements FROM tableName whereClause?
+    ;
+
+selectElements
+    : '*'
+    | columnName (',' columnName)*
+    ;
+
+whereClause
+    : WHERE expr
+    ;
+
+expr
+    : expr AND expr
+    | expr OR expr
+    | predicate
+    ;
+
+predicate
+    : columnName comparator literal
+    ;
+
+columnName
+    : ID
+    ;
+
+tableName
+    : ID
+    ;
+
+comparator
+    : '=' | '>' | '<' | '>=' | '<=' | '<>'
+    ;
+
+literal
+    : STRING
+    | NUMBER
+    ;
+
+SELECT : 'SELECT';
+FROM : 'FROM';
+WHERE : 'WHERE';
+AND : 'AND';
+OR : 'OR';
+
+ID : [a-zA-Z_][a-zA-Z0-9_]*;
+NUMBER : [0-9]+;
+STRING : '\'' (~['\r\n])* '\'';
+
+WS : [ \t\r\n]+ -> skip;
+```
+
+> 注意：这是示例语法，可根据你实际 SQL 复杂度扩展。
+
+---
+
+# 2️⃣ Java 实现 — 使用 Visitor 检查敏感字段
+
+```java
+import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.tree.*;
+
+import java.util.HashSet;
+import java.util.Set;
+
+public class SensitiveSqlChecker {
+
+    // 自定义敏感字段
+    private static final Set<String> SENSITIVE_COLUMNS = Set.of(
+            "id_card", "mobile", "email", "bank_no"
+    );
+
+    public static boolean containsSensitiveCondition(String sql) {
+        // 1. 构建 ANTLR 输入流
+        CharStream input = CharStreams.fromString(sql);
+
+        // 2. 词法分析
+        SimpleSqlLexer lexer = new SimpleSqlLexer(input);
+        CommonTokenStream tokens = new CommonTokenStream(lexer);
+
+        // 3. 语法分析
+        SimpleSqlParser parser = new SimpleSqlParser(tokens);
+        ParseTree tree = parser.parse();
+
+        // 4. 访问 WHERE 子树
+        SensitiveVisitor visitor = new SensitiveVisitor();
+        visitor.visit(tree);
+
+        return visitor.hasSensitive;
+    }
+
+    // 自定义 Visitor
+    static class SensitiveVisitor extends SimpleSqlBaseVisitor<Void> {
+
+        boolean hasSensitive = false;
+
+        @Override
+        public Void visitPredicate(SimpleSqlParser.PredicateContext ctx) {
+            if (ctx.columnName() != null) {
+                String col = ctx.columnName().getText().toLowerCase();
+                if (SensitiveSqlChecker.SENSITIVE_COLUMNS.contains(col)) {
+                    hasSensitive = true;
+                }
+            }
+            return super.visitPredicate(ctx);
+        }
+    }
+
+    // 测试
+    public static void main(String[] args) {
+        String sql = "SELECT name, age FROM user WHERE mobile = '18812345678' AND age > 18";
+
+        boolean result = containsSensitiveCondition(sql);
+        System.out.println("是否包含敏感数据条件: " + result);
+    }
+}
+```
+
+---
+
+# 3️⃣ 示例运行结果
+
+输入：
 
 ```sql
-SELECT a.id, b.phone
-FROM user a
-JOIN user_detail b ON a.id = b.user_id
-WHERE a.name = 'Tom'
-  AND (b.phone = '123456' OR b.idcard LIKE '%123%');
+SELECT name FROM user WHERE mobile = '18888888888'
 ```
 
-我们要解析出：
+输出：
 
-| 表           | 字段     |
-| ----------- | ------ |
-| user        | name   |
-| user_detail | phone  |
-| user_detail | idcard |
-
-然后再到 `sensitive_fields` 表判断是否属于敏感字段。
-
----
-
-# 🔧 JSqlParser 5.3 实现
-
-下面给你一段**可运行的 Java 代码示例**，适用于 Spring Boot / 单元测试。
-
-## 👉 1. 解析 SQL
-
-```java
-Statement statement = CCJSqlParserUtil.parse(sql);
-Select select = (Select) statement;
-PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
+```
+是否包含敏感数据条件: true
 ```
 
 ---
 
-## 👉 2. 获取所有表（含别名映射）
+# 4️⃣ 如果你的 SQL 非常复杂？
 
-```java
-// key: 别名或表名本身，value: 真实表名
-Map<String, String> tableAliasMap = new HashMap<>();
+我可以帮你实现：
 
-FromItem fromItem = plainSelect.getFromItem();
-handleFromItem(fromItem, tableAliasMap);
+✅ MySQL 完整语法（官方 ANTLR）
+✅ 支持复杂 WHERE
+✅ 支持函数表达式
+✅ 支持嵌套子查询
+✅ 支持 JOIN 条件识别敏感字段
+✅ 支持参数化 SQL（? 或 :name）
 
-List<Join> joins = plainSelect.getJoins();
-if (joins != null) {
-    for (Join join : joins) {
-        handleFromItem(join.getRightItem(), tableAliasMap);
-    }
-}
-```
+告诉我你的 SQL 类型（MySQL / PostgreSQL / Oracle / SQL Server），我可以帮你：
 
-辅助方法：
-
-```java
-private void handleFromItem(FromItem fromItem, Map<String, String> map) {
-    if (fromItem instanceof Table) {
-        Table table = (Table) fromItem;
-        String tableName = table.getName();
-        String alias = table.getAlias() != null ? table.getAlias().getName() : tableName;
-        map.put(alias, tableName);
-    }
-}
-```
+**生成完整可用的 ANTLR4 语法 + Java 校验器**。
 
 ---
 
-## 👉 3. 抽取 WHERE、JOIN ON 中所有字段
+如果你愿意，我也可以帮你：
 
-```java
-Expression where = plainSelect.getWhere();
-List<Column> columns = new ArrayList<>();
-if (where != null) {
-    where.accept(new ExpressionVisitorAdapter() {
-        @Override
-        public void visit(Column column) {
-            columns.add(column);
-        }
-    });
-}
+🔧 根据你现有的敏感字段列表自动生成检测器
+🔧 输出命中字段列表而不是 true/false
+🔧 支持脱敏策略（如不允许出现在 WHERE）
 
-// 处理 JOIN 的 ON 表达式
-if (joins != null) {
-    for (Join join : joins) {
-        Expression on = join.getOnExpression();
-        if (on != null) {
-            on.accept(new ExpressionVisitorAdapter() {
-                @Override
-                public void visit(Column column) {
-                    columns.add(column);
-                }
-            });
-        }
-    }
-}
-```
-
----
-
-## 👉 4. 将 Column 转换为 (真实表名, 字段名)
-
-解析出的字段可能是：
-
-* `a.name`
-* `b.phone`
-
-需要转为真实表名：
-
-```java
-List<String> riskFields = new ArrayList<>();
-
-for (Column column : columns) {
-    String tableAlias = column.getTable() != null ? column.getTable().getName() : null;
-    String field = column.getColumnName();
-
-    // 如果 SQL 中未带表前缀，可按业务规则处理
-    if (tableAlias == null) {
-        continue;
-    }
-
-    String realTable = tableAliasMap.get(tableAlias);
-    if (realTable == null) continue;
-
-    // 校验敏感字段
-    if (isSensitive(realTable, field)) {
-        riskFields.add(realTable + "." + field);
-    }
-}
-```
-
----
-
-## 👉 5. 比对敏感字段表（伪代码）
-
-```java
-private boolean isSensitive(String table, String field) {
-    // 示例：你可以查数据库或从缓存里取
-    return sensitiveFieldService.exists(table, field);
-}
-```
-
----
-
-# 🎉 最终结合示例：完整代码片段
-
-```java
-public List<String> detectSensitiveFields(String sql) throws Exception {
-    Statement statement = CCJSqlParserUtil.parse(sql);
-    Select select = (Select) statement;
-    PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
-
-    // 1. 解析表别名
-    Map<String, String> tableAliasMap = new HashMap<>();
-    handleFromItem(plainSelect.getFromItem(), tableAliasMap);
-
-    List<Join> joins = plainSelect.getJoins();
-    if (joins != null) {
-        for (Join join : joins) {
-            handleFromItem(join.getRightItem(), tableAliasMap);
-        }
-    }
-
-    // 2. 抽取所有 Column
-    List<Column> columns = new ArrayList<>();
-
-    if (plainSelect.getWhere() != null) {
-        plainSelect.getWhere().accept(new ExpressionVisitorAdapter() {
-            @Override
-            public void visit(Column column) {
-                columns.add(column);
-            }
-        });
-    }
-
-    if (joins != null) {
-        for (Join join : joins) {
-            if (join.getOnExpression() != null) {
-                join.getOnExpression().accept(new ExpressionVisitorAdapter() {
-                    @Override
-                    public void visit(Column column) {
-                        columns.add(column);
-                    }
-                });
-            }
-        }
-    }
-
-    // 3. 校验敏感字段
-    List<String> result = new ArrayList<>();
-
-    for (Column column : columns) {
-        String tableAlias = column.getTable() != null ? column.getTable().getName() : null;
-        if (tableAlias == null) continue;
-
-        String realTable = tableAliasMap.get(tableAlias);
-        String field = column.getColumnName();
-
-        if (realTable != null && isSensitive(realTable, field)) {
-            result.add(realTable + "." + field);
-        }
-    }
-
-    return result;
-}
-```
-
----
-
-# 🧪 输出示例
-
-如果敏感字段表中有：
-
-| 表名          | 字段名    |
-| ----------- | ------ |
-| user_detail | phone  |
-| user_detail | idcard |
-
-则结果：
-
-```json
-[
-  "user_detail.phone",
-  "user_detail.idcard"
-]
-```
-
----
-
-# 📌 性能建议
-
-* 敏感字段表建议缓存到 `Map<String, Set<String>>`
-* 解析 SQL 用 JSqlParser 开销不大（单次 1–5ms）
-* WHERE、JOIN、子查询都能用 above 方式处理
-* 如遇复杂 UNION，可以递归 SelectVisitor（可提供样例）
-
----
-
-如果你需要的话，我也可以：
-
-✅ 再给出 **支持子查询 / UNION / WITH 的完整通用版解析器**
-✅ 帮你封装一个 **敏感 SQL 检查器工具类（Java 可直接复用）**
-✅ 输出 **Spring Boot + MySQL 敏感字段表 Demo**
-
-需要吗？
+需要我继续扩展吗？
