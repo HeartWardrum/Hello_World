@@ -1,173 +1,158 @@
-下面给你一个**可直接在 Java 中使用 ANTLR 4.13.2** 的完整思路与示例代码，用来**判断 Spark SQL 查询条件（WHERE/HAVING）中是否包含敏感字段**。
-
-## 🧩 总体思路
-
-1. **下载 Spark SQL 的 ANTLR 语法文件**
-   Spark 官方语法在 `antlr4` 下（spark-parser）。你也可用开源简化版本，例如：
-
-   ```
-   SparkSqlBase.g4
-   SqlBaseLexer.g4
-   SqlBaseParser.g4
-   ```
-
-   （如果你需要，我可以直接给你裁剪后的可用 g4 文件）
-
-2. **使用 ANTLR 4.13.2 生成解析器**
-
-3. 在 Java 中：
-
-   * 解析 SQL → 得到 AST
-   * 自定义一个 `ParseTreeWalker` Listener
-   * 在 listener 中只处理 WHERE/HAVING 条件表达式
-   * 检测字段名称是否命中敏感字段列表
+使用 **Listener** 或 **Visitor** 都能解析 SQL，本质上没有对错之分，只是**用途不同、解析风格不同**。
+你问 “为什么不用 visitor 解析 SQL？”，我来从 **ANTLR 工作机制、Spark SQL 的语法特性、工程实践** 三方面解释，让你一眼就明白两者差异。
 
 ---
 
-# ✅ Java 实现示例（ANTLR 4.13.2）
+# ✅ 一句话结论
 
-以下代码基于 Spark SQL 常用语法（支持 SELECT, WHERE, AND/OR, 比较表达式等）。
+**解析 SQL 条件表达式时，用 Listener 更轻量，用 Visitor 更可控。**
+上面我给的示例用 Listener，是因为它更适合 **事件驱动式检测（例如：只要出现敏感字段就返回 true）**。
+
+但实际上：
+👉 **Visitor 在 SQL 解析中更常见，也更适合复杂规则分析**。
+
+如果你的规则以后要扩展，我反而推荐改用 Visitor。
 
 ---
 
-## 1️⃣ 监听器：检测敏感字段
+# 📌 Listener vs Visitor 的关键区别
+
+| 特点   | Listener（监听器）    | Visitor（访问器）      |
+| ---- | ---------------- | ----------------- |
+| 触发方式 | 事件回调（enter/exit） | 手动控制访问过程          |
+| 控制力  | 被动，进入节点就触发       | 主动，想访问谁访问谁        |
+| 适合用途 | 简单遍历、模式匹配、检测字段   | 表达式求值、AST 构造、复杂分析 |
+| 代码结构 | 低侵入，但逻辑分散在多个方法   | 结构化强，可集中处理表达式     |
+| 性能   | 快，遍历一次           | 可裁剪，不必全遍历         |
+
+---
+
+# 🧠 为什么示例里我用 Listener？
+
+你的核心需求是：
+
+> 判断 WHERE/HAVING 是否包含敏感字段
+
+这类逻辑是典型的**事件型匹配**：
+
+* 出现列名 → 判断是否敏感
+* 匹配到敏感字段即可提前结束
+* 不需要构建 AST
+* 不需要对表达式求值
+* 不需要对 SQL 逻辑整体建模
+
+Listener 在这种场景里明显更轻：
 
 ```java
-import java.util.HashSet;
-import java.util.Set;
-
-public class SensitiveFieldListener extends SparkSqlBaseBaseListener {
-
-    private final Set<String> sensitiveFields;
-    private boolean hasSensitiveField = false;
-
-    public SensitiveFieldListener(Set<String> sensitiveFields) {
-        this.sensitiveFields = sensitiveFields;
+@Override
+public void enterColumnReference(Context ctx) {
+    if (sensitiveFields.contains(ctx.getText())) {
+        hasSensitive = true;
     }
+}
+```
 
-    public boolean hasSensitiveField() {
-        return hasSensitiveField;
+简单直接，不需要控制遍历流程。
+
+---
+
+# 🧠 为什么有些人更喜欢 Visitor？
+
+Visitor 更像手写 AST 解析器，优势非常大：
+
+### ✔ 1. 避免遍历整个树（更快）
+
+你可以只访问 WHERE 子树：
+
+```java
+visit(ctx.whereClause());
+```
+
+Listener 不行，它必须遍历整个语法树。
+
+### ✔ 2. 树节点分类清晰
+
+例如：
+
+* visitBooleanExpression
+* visitComparison
+* visitLogicalOperator
+* visitColumnReference
+
+所有解析逻辑集中在一个类里，非常适合复杂规则。
+
+### ✔ 3. 更适合将 SQL 转换成内部表达式对象（AST）
+
+如果你要做：
+
+* SQL 黑名单检查
+* SQL 转 Java Predicate
+* SQL 语义分析
+
+Visitor 明显更专业。
+
+---
+
+# 🔥 Visitor 版的敏感字段检测（你可能更喜欢）
+
+```java
+public class SensitiveFieldVisitor extends SparkSqlBaseBaseVisitor<Boolean> {
+
+    private final Set<String> sensitive;
+
+    public SensitiveFieldVisitor(Set<String> sensitive) {
+        this.sensitive = sensitive;
     }
 
     @Override
-    public void enterColumnReference(SparkSqlBaseParser.ColumnReferenceContext ctx) {
-        if (hasSensitiveField) return;
-
+    public Boolean visitColumnReference(SparkSqlBaseParser.ColumnReferenceContext ctx) {
         String column = ctx.getText().toLowerCase();
 
-        // 去除表别名，例如 t.user_name → user_name
         if (column.contains(".")) {
             column = column.substring(column.indexOf('.') + 1);
         }
 
-        if (sensitiveFields.contains(column)) {
-            hasSensitiveField = true;
-        }
+        return sensitive.contains(column);
+    }
+
+    @Override
+    protected Boolean defaultResult() {
+        return false;
+    }
+
+    @Override
+    protected Boolean aggregateResult(Boolean aggregate, Boolean nextResult) {
+        return aggregate || nextResult; // 遇到敏感字段即可返回 true
     }
 }
 ```
 
----
-
-## 2️⃣ SQL 检测方法
+使用：
 
 ```java
-import org.antlr.v4.runtime.*;
-import org.antlr.v4.runtime.tree.*;
-
-import java.util.Set;
-
-public class SparkSqlSensitiveChecker {
-
-    public static boolean containsSensitiveField(String sql, Set<String> sensitiveFields) {
-        CharStream input = CharStreams.fromString(sql);
-
-        SparkSqlBaseLexer lexer = new SparkSqlBaseLexer(input);
-        CommonTokenStream tokens = new CommonTokenStream(lexer);
-        SparkSqlBaseParser parser = new SparkSqlBaseParser(tokens);
-
-        parser.removeErrorListeners(); // 可选
-        parser.addErrorListener(new BaseErrorListener() {
-            @Override
-            public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
-                                    int line, int charPositionInLine, String msg, RecognitionException e)
-                    throws RuntimeException {
-                throw new RuntimeException("SQL语法错误: " + msg, e);
-            }
-        });
-
-        ParseTree tree = parser.singleStatement();
-
-        SensitiveFieldListener listener = new SensitiveFieldListener(sensitiveFields);
-        ParseTreeWalker.DEFAULT.walk(listener, tree);
-
-        return listener.hasSensitiveField();
-    }
-}
+SensitiveFieldVisitor visitor = new SensitiveFieldVisitor(sensitiveFields);
+boolean hasSensitive = visitor.visit(tree);
 ```
 
 ---
 
-## 3️⃣ 使用示例
+# 🎯 总结（理清你应该怎么选）
 
-```java
-import java.util.Set;
+### ✔ 如果你只是做 **轻量判断**
 
-public class Demo {
-    public static void main(String[] args) {
-        String sql = "SELECT * FROM user WHERE id > 10 AND phone_no = '123'";
+例如 “WHERE 里是否包含某字段”，Listener 足够且更快。
 
-        Set<String> sensitive = Set.of("phone_no", "id_card", "bank_account");
+### ✔ 如果你要做 **复杂 SQL 解析/改写/抽象语法分析**
 
-        boolean result = SparkSqlSensitiveChecker.containsSensitiveField(sql, sensitive);
-
-        System.out.println("是否包含敏感字段: " + result);
-    }
-}
-```
-
-输出：
-
-```
-是否包含敏感字段: true
-```
+Visitor 绝对是首选。
 
 ---
 
-# 🔍 检测范围支持
+# 📌 如果你愿意，我可以继续提供：
 
-上述方案能检测以下位置是否出现敏感字段：
+* Visitor + Listener 混合最佳实践
+* 生产级 Spark SQL 子查询解析方案
+* 敏感字段检测增强版（支持 UDF、CASE WHEN、子查询、JOIN ON 等）
+* 自动提取 WHERE/HAVING 字段的完整工具类
 
-* WHERE 条件中的：
-
-  * `col = value`
-  * `col > ...`
-  * `col IN (...)`
-  * `col LIKE ...`
-* HAVING 条件
-* AND/OR 嵌套
-* 带表别名字段 `t.col`
-
-如：
-
-```sql
-SELECT t.id FROM user t WHERE t.phone_no LIKE '13%'
-```
-
-能够正确识别 `phone_no`。
-
----
-
-# 📦 可提供的内容
-
-如果你需要，我可以直接提供：
-
-✔ 精简版 Spark SQL 的 ANTLR g4 文件（完全能解析常用 SELECT + WHERE）
-✔ Maven 配置（antlr4 插件）
-✔ 敏感字段表达式识别增强版（支持 UDF、CASE WHEN、子查询）
-✔ 反向输出敏感字段列表，而不仅是是否存在
-
----
-
-如果你愿意，我可以把 **完整可运行的 Maven + Java + g4 文件工程** 一次性打包给你。只要告诉我：
-**是否需要完整项目结构？**
+你想继续用 Listener，还是希望我给你 **Visitor 版完整项目模板**？
