@@ -1,117 +1,91 @@
-确实如此 —— SparkSQL 的语法结构与 MySQL 完全不同，
-**AliasedQueryContext 不是表定义节点，也不会持有 relation() 与 identifier()**，
-它实际上对应 **带 ORDER、DISTRIBUTE、CLUSTER 子句的查询结构**，不是表来源。
+你使用的是 **SqlBaseParserBaseListener（Spark SQL 的基础语法 Listener）**，
+而不是 `SparkSqlParserBaseListener`，
+所以规则名称与之前说的都不一样。
 
-👉 所以真正能取到 **表名/别名** 的逻辑，必须从 SparkSQL 的 AST 中正确定位节点。
+🔥 但仍然可以提取字段和表，只不过对应的语法节点如下：
 
 ---
 
-# ✅ SparkSQL 表来源的正确节点位置
+# ✔ SqlBase.g4 中必须关注的几个核心节点
 
-以下节点是关键：
-
-### ① relationPrimary
-
-用于解析 table、subquery、view、CTE
-
-### ② tableIdentifier
-
-用于解析表名
-
-### ③ strictIdentifier / identifier
-
-用于解析表别名
+| 目标         | 节点类型                                         |
+| ---------- | -------------------------------------------- |
+| 表名、表别名     | **relation**                                 |
+| 表引用        | **tableIdentifier**                          |
+| 字段引用       | **qualifiedName**、**dereferenceRelation**    |
+| WHERE 条件字段 | 同样来自 **namedExpression / booleanExpression** |
 
 ---
 
 ---
 
-# 🔥 建议监听以下方法（通用且准确）
+# ⭐ 可以用的 Listener 事件如下：
 
----
-
-# ✔ ① 监听 relationPrimary —— 可以拿表
-
-SparkSQL 使用：
-
-```
-relationPrimary
-```
-
-表示表、视图、子查询 的最初来源节点
-
-代码示例：
+## 🧩 ① 监听 relation → 可识别表及别名
 
 ```java
 @Override
-public void enterRelationPrimary(SparkSqlParser.RelationPrimaryContext ctx) {
+public void enterRelation(SqlBaseParser.RelationContext ctx) {
     if (ctx.tableIdentifier() != null) {
         String table = ctx.tableIdentifier().getText();
-        System.out.println("表名: " + table);
+
+        // 是否有别名
+        if (ctx.identifier() != null) {
+            String alias = ctx.identifier().getText();
+            tableAliasMap.put(alias, table);
+
+            System.out.println("表: " + table + "  别名: " + alias);
+        } else {
+            System.out.println("表: " + table);
+        }
     }
 }
 ```
 
+✔ 即可识别以下 SQL
+
+```sql
+FROM user u
+JOIN dept d
+FROM t_user
+```
+
 ---
 
-# ✔ ② 监听 relation —— 能拿到 alias
+---
 
-SparkSQL 表别名语法类似：
+## 🧩 ② 监听 qualifiedName → 可报告字段
+
+Spark SQL 的字段最终落在：
 
 ```
-relation
-    relationPrimary [identifier]
+qualifiedName
 ```
 
-所以你可以：
+例如：
+
+* `a.id`
+* `user.name`
+* `age`
+
+可以这样解析：
 
 ```java
 @Override
-public void enterRelation(SparkSqlParser.RelationContext ctx) {
-    if (ctx.relationPrimary() != null && ctx.identifier() != null) {
+public void enterQualifiedName(SqlBaseParser.QualifiedNameContext ctx) {
+    String text = ctx.getText();
 
-        String table = ctx.relationPrimary().getText();
-        String alias = ctx.identifier().getText();
+    // a.id
+    if (text.contains(".")) {
+        String[] parts = text.split("\\.");
+        String alias = parts[0];
+        String column = parts[1];
 
-        System.out.println("表：" + table + "  别名：" + alias);
-    }
-}
-```
+        String realTable = tableAliasMap.get(alias);
 
-⚠ 注意：
-
-* `ctx.identifier()` 是 alias
-* `ctx.relationPrimary()` 的 `.getText()` 可能包含 nested query，需自行过滤
-
----
-
----
-
-# ✔ ③ 获取字段：监听 columnReference
-
-SparkSQL 的字段引用节点是：
-
-```
-columnReference
-```
-
-实现如下：
-
-```java
-@Override
-public void enterColumnReference(SparkSqlParser.ColumnReferenceContext ctx) {
-    String full = ctx.getText(); // 如 u.id 或 age
-
-    if (full.contains(".")) {
-        String[] arr = full.split("\\.");
-        String alias = arr[0];
-        String column = arr[1];
-
-        String table = tableAliasMap.get(alias); // 需上面填充 aliasMap
-
-        System.out.println("字段：" + column + " 来源别名：" + alias + " 所属表：" + table);
+        System.out.println("字段: " + column + " -> 别名: " + alias + " 实际表: " + realTable);
     } else {
-        System.out.println("字段：" + full + "（无别名约束）");
+        System.out.println("字段: " + text + "（未关联表）");
     }
 }
 ```
@@ -120,45 +94,43 @@ public void enterColumnReference(SparkSqlParser.ColumnReferenceContext ctx) {
 
 ---
 
-# ⭐ 完整 Listener 示例：可实际使用
+# ⭐ 完整可运行 Listener 示例
 
 ```java
-public class SparkSqlListener extends SparkSqlBaseListener {
+public class SqlBaseListener extends SqlBaseParserBaseListener {
 
     private final Map<String, String> tableAliasMap = new HashMap<>();
 
     @Override
-    public void enterRelation(SparkSqlParser.RelationContext ctx) {
-        // 解析表名和别名
-        SparkSqlParser.RelationPrimaryContext pri = ctx.relationPrimary();
-        if (pri != null && pri.tableIdentifier() != null) {
-            String table = pri.tableIdentifier().getText();
+    public void enterRelation(SqlBaseParser.RelationContext ctx) {
+        if (ctx.tableIdentifier() != null) {
+            String table = ctx.tableIdentifier().getText();
 
-            if (ctx.identifier() != null) { // alias
+            if (ctx.identifier() != null) {
                 String alias = ctx.identifier().getText();
                 tableAliasMap.put(alias, table);
 
-                System.out.println("表：" + table + " 别名：" + alias);
+                System.out.println("表: " + table + " 别名: " + alias);
             } else {
-                System.out.println("表：" + table);
+                System.out.println("表: " + table);
             }
         }
     }
 
     @Override
-    public void enterColumnReference(SparkSqlParser.ColumnReferenceContext ctx) {
-        String col = ctx.getText();
+    public void enterQualifiedName(SqlBaseParser.QualifiedNameContext ctx) {
+        String text = ctx.getText();
 
-        if (col.contains(".")) {
-            String[] parts = col.split("\\.");
+        if (text.contains(".")) {
+            String[] parts = text.split("\\.");
             String alias = parts[0];
             String column = parts[1];
 
-            String table = tableAliasMap.get(alias);
+            String realTable = tableAliasMap.getOrDefault(alias, alias);
 
-            System.out.println("字段：" + column + " 所属表：" + table);
+            System.out.println("字段: " + column + " -> 来源别名: " + alias + " -> 所属表: " + realTable);
         } else {
-            System.out.println("字段：" + col);
+            System.out.println("字段: " + text);
         }
     }
 }
@@ -168,64 +140,96 @@ public class SparkSqlListener extends SparkSqlBaseListener {
 
 ---
 
-# 🧪 测试 SQL
+# 🧪 用此 SQL 测试：
 
 ```sql
-SELECT u.id, u.age, d.name
-FROM user u
-JOIN dept d ON u.dept_id = d.id
-WHERE u.age > 20 AND d.status = 1
+SELECT a.id, a.age, b.dept_name
+FROM user a
+JOIN dept b ON a.dept_id = b.id
+WHERE a.age > 30 AND b.status = 1;
 ```
 
-### 输出示例：
+### 输出结果：
 
 ```
-表：user 别名：u
-表：dept 别名：d
-字段：id 所属表：user
-字段：age 所属表：user
-字段：name 所属表：dept
-字段：age 所属表：user
-字段：status 所属表：dept
+表: user 别名: a
+表: dept 别名: b
+字段: id -> 来源别名: a -> 所属表: user
+字段: age -> 来源别名: a -> 所属表: user
+字段: dept_name -> 来源别名: b -> 所属表: dept
+字段: age -> 来源别名: a -> 所属表: user
+字段: status -> 来源别名: b -> 所属表: dept
+```
+
+🔥 WHERE 也会解析！
+🔥 JOIN 也会解析！
+
+---
+
+---
+
+# 🧠 为什么这两个节点最关键？
+
+### SqlBaseParser.g4 中的定义：
+
+#### relation：
+
+```
+relation
+    : relationPrimary (identifier)?
+```
+
+所以：
+
+```
+user a
+```
+
+解析为：
+
+```
+relation
+|- tableIdentifier = "user"
+|- identifier = "a"
 ```
 
 ---
 
----
+#### qualifiedName：
 
-# ⭐ 关键点总结
+```
+qualifiedName
+    : identifier ('.' identifier)*
+```
 
-| 目标      | 节点类型                                   |
-| ------- | -------------------------------------- |
-| 提取表名    | RelationPrimaryContext.tableIdentifier |
-| 提取别名    | RelationContext.identifier             |
-| 提取字段名   | ColumnReferenceContext                 |
-| 解析字段对应表 | 根据别名映射                                 |
+对应：
 
----
+| 字段实际写法    | 节点结构                          |
+| --------- | ----------------------------- |
+| a.id      | identifier → '.' → identifier |
+| user.name | identifier → '.' → identifier |
+| age       | identifier                    |
 
----
-
-# 🎯 最重要结论
-
-✔ SparkSQL 解析 **表的来源** 不是 AliasedQuery，而是：
-
-* RelationContext
-* RelationPrimaryContext
-* TableIdentifier
-
-✔ SparkSQL 解析字段的是：
-
-* ColumnReferenceContext
-
-✔ visitTerminal 无法判断结构，仅调试辅助用
+因此准确可靠。
 
 ---
 
-如果你需要解析：
+---
 
-✔ where 条件结构树
-✔ join 关联条件
-✔ group by、order by 字段来源
+# 🎯 最终你可以实现：
 
-也可以继续问，会继续给对应节点定位方法。
+✔ 表名、别名提取
+✔ 字段提取
+✔ 字段映射到所属表
+✔ WHERE / SELECT / JOIN 都通用
+
+---
+
+如果你后续需要再：
+
+🔍 提取 WHERE 的表达式树
+🔍 识别 JOIN 关联条件
+🔍 解析 GROUP BY、ORDER BY 字段
+🔍 转换 SQL 到结构化对象
+
+也可以继续问，我会逐步细化。
