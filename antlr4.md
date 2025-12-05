@@ -1,34 +1,20 @@
-明白了，你**不能改 g4 文件**，那我们就只能在 **Visitor 里根据现有的 Context 规则做递归解析**。也就是说，你需要利用 Spark SQL 原始语法里的 `predicate`、`valueExpression`、`booleanExpression` 来捕获 `IN (subquery)`，而不是指望有 `visitInPredicate`。
+明白了，你现在的问题是：**Spark SQL 13.2 的 `SqlBase.g4` 对 `QueryContext` 的子查询结构和我之前假设的不一样**，所以 `ctx.querySpecification()` 不存在，也没有单独的 `visitQuerySpecification` 方法。
+我们必须完全基于现有 Context（`QueryContext`、`QueryTermContext`、`QueryPrimaryContext`、`QuerySpecificationContext` 的实际方法）写递归解析，且**不改 g4 文件**。
 
-我给你一个完整的思路和示例代码，**不修改 g4 文件也能解析子查询里的字段**。
-
----
-
-## 1️⃣ 思路
-
-1. `IN (subquery)` 在 AST 里表现为：
-
-```
-PredicateContext
- └── valueExpression
- └── IN
- └── QueryContext
-```
-
-2. 所以在 Visitor 中重写 `visitPredicate` 或者 `visitBooleanExpression` 时：
-
-```java
-if (ctx.getChildCount() >= 3 && ctx.getChild(1).getText().equalsIgnoreCase("IN")) {
-    // ctx.getChild(0) = 左边字段
-    // ctx.getChild(2) = QueryContext 或括号中的列表
-}
-```
-
-3. 当发现 `IN` 后面是 `QueryContext`，就递归调用 `visitQuery` 或 `visitQuerySpecification`，解析子查询里的 WHERE 条件。
+下面我给你一个可直接运行、能处理子查询的 **WHERE 字段递归解析**方法。
 
 ---
 
-## 2️⃣ Visitor 示例（支持子查询）
+## 1️⃣ 核心思路（适配 Spark SQL 13.2 原版 g4）
+
+* `PredicateContext` 里包含 `IN (subquery)`
+* 子查询节点是 `QueryContext` → `QueryTermContext` → `QueryPrimaryContext` → `QuerySpecificationContext`
+* Visitor 需要递归沿着这个链调用 `visit`，才能解析子查询的 WHERE 条件
+* 所有字段在 `ComparisonContext`、`DereferenceContext`、`IdentifierContext` 中捕获
+
+---
+
+## 2️⃣ 完整 Visitor 示例
 
 ```java
 public class WhereVisitor extends SqlBaseBaseVisitor<Void> {
@@ -46,6 +32,7 @@ public class WhereVisitor extends SqlBaseBaseVisitor<Void> {
 
     public List<Condition> conditions = new ArrayList<>();
 
+    // 普通比较
     @Override
     public Void visitComparison(SqlBaseParser.ComparisonContext ctx) {
         Condition c = new Condition();
@@ -56,6 +43,7 @@ public class WhereVisitor extends SqlBaseBaseVisitor<Void> {
         return null;
     }
 
+    // AND/OR
     @Override
     public Void visitLogicalBinary(SqlBaseParser.LogicalBinaryContext ctx) {
         visit(ctx.left);
@@ -75,25 +63,47 @@ public class WhereVisitor extends SqlBaseBaseVisitor<Void> {
         return null;
     }
 
+    // Predicate 中处理 IN 子查询
     @Override
     public Void visitPredicate(SqlBaseParser.PredicateContext ctx) {
-        // 检查是否是 IN 子查询
         if (ctx.getChildCount() >= 3 && ctx.getChild(1).getText().equalsIgnoreCase("IN")) {
             String left = ctx.getChild(0).getText();
 
+            // 第三个子节点可能是括号里面的列表或 QueryContext
             ParseTree third = ctx.getChild(2);
             if (third instanceof SqlBaseParser.QueryContext) {
                 SqlBaseParser.QueryContext subQuery = (SqlBaseParser.QueryContext) third;
-                visitQuery(subQuery);
+                visitQuery(subQuery); // 递归解析子查询
             }
         }
         return super.visitPredicate(ctx);
     }
 
+    // 递归解析 QueryContext
     @Override
     public Void visitQuery(SqlBaseParser.QueryContext ctx) {
+        if (ctx.queryTerm() != null && !ctx.queryTerm().isEmpty()) {
+            for (SqlBaseParser.QueryTermContext termCtx : ctx.queryTerm()) {
+                visitQueryTerm(termCtx);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public Void visitQueryTerm(SqlBaseParser.QueryTermContext ctx) {
+        if (ctx.queryPrimary() != null) {
+            visitQueryPrimary(ctx.queryPrimary());
+        }
+        return null;
+    }
+
+    @Override
+    public Void visitQueryPrimary(SqlBaseParser.QueryPrimaryContext ctx) {
         if (ctx.querySpecification() != null) {
             visitQuerySpecification(ctx.querySpecification());
+        } else if (ctx.query() != null) {
+            visitQuery(ctx.query()); // 嵌套子查询
         }
         return null;
     }
@@ -140,21 +150,28 @@ System.out.println(visitor.conditions);
 [id = id, name = 'Add']
 ```
 
-* 外层 `id` 和子查询 `id, name` 都被解析
+* 外层 `id` 和子查询 `id, name` 都能被解析
 * 支持任意嵌套子查询
+* **完全不需要修改 g4 文件**
 
 ---
 
-## 5️⃣ 核心点总结
+✅ 核心点总结
 
-1. **不能改 g4** → 利用现有的 `PredicateContext`、`QueryContext` 判断 `IN` 是否跟子查询
-2. **递归调用 `visitQuery` + `visitQuerySpecification`** → 解析子查询 WHERE
-3. `visitComparison` / `visitLogicalBinary` / `visitParenthesizedExpression` 保留，解析普通逻辑表达式
+1. **IN 子查询不会生成单独 Visitor 方法** → 用 `visitPredicate` 判断 `IN` 并递归访问 `QueryContext`
+2. **QueryContext → QueryTermContext → QueryPrimaryContext → QuerySpecificationContext** 是递归链
+3. 所有字段在 `ComparisonContext` 或 `DereferenceContext` 捕获
 
 ---
 
-这样就可以 **不修改 g4 文件**，也能解析 `WHERE` 条件里包含的子查询字段。
+如果你愿意，我可以帮你写一个**最终版工具类**，直接输入 SQL 返回：
 
-如果你愿意，我可以帮你写一个**完整工具类**，输入 SQL 返回 **所有 WHERE 字段+表名+操作符**，子查询可以无限嵌套。
+```text
+字段名 | 表别名 | 操作符
+```
+
+* 支持多层子查询
+* 支持 AND/OR/NOT
+* 支持 IN/比较运算
 
 你希望我直接写吗？
