@@ -96,7 +96,7 @@ class RegionSelector:
         self.canvas.create_text(
             sw // 2,
             35,
-            text="拖动鼠标选择截图区域    ESC取消",
+            text="拖动鼠标选择截图区域    右键点击取消",
             fill="#ff3b30",
             font=("微软雅黑", 16, "bold")
         )
@@ -104,7 +104,7 @@ class RegionSelector:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.win.bind("<Escape>", lambda e: self.cancel())
+        self.win.bind("<Button-3>", lambda e: self.cancel())
 
     def on_press(self, event):
         self.start_x = event.x
@@ -351,8 +351,8 @@ class AnnotationWindow:
 
     def get_image(self):
         self.root.update()
-        x = self.root.winfo_rootx() + self.canvas.winfo_x()
-        y = self.root.winfo_rooty() + self.canvas.winfo_y()
+        x = self.canvas.winfo_rootx()
+        y = self.canvas.winfo_rooty()
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         return ImageGrab.grab(bbox=(x, y, x + w, y + h))
