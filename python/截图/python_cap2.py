@@ -13,6 +13,8 @@ Win11 截图标注工具
     Ctrl+Z     撤销一步
     ESC        关闭窗口
     滚轮       调整粗细
+    双击图片   关闭窗口
+    拖动工具栏 移动窗口
 """
 
 import io
@@ -164,8 +166,14 @@ class AnnotationWindow:
         self.current_brush_items = []
         self.undo_stack = []
         self.topmost = True
+        
+        # 用于无边框窗口拖动的变量
+        self.drag_data = {"x": 0, "y": 0}
 
-        root.title("截图标注")
+        # ====================
+        # 窗口属性设置
+        # ====================
+        root.overrideredirect(True)  # 完全去掉边框和标题栏
         root.attributes("-topmost", True)
         root.configure(bg="#2c3e50")
 
@@ -176,8 +184,12 @@ class AnnotationWindow:
         toolbar.pack(side=tk.TOP, fill=tk.X)
         toolbar.pack_propagate(False)
 
+        # 允许通过拖动工具栏来移动无边框窗口
+        toolbar.bind("<ButtonPress-1>", self.start_window_move)
+        toolbar.bind("<B1-Motion>", self.drag_window_move)
+
         tk.Label(
-            toolbar, text="颜色", bg="#2c3e50", fg="white", font=("微软雅黑", 10)
+            toolbar, text=" 颜色", bg="#2c3e50", fg="white", font=("微软雅黑", 10)
         ).pack(side=tk.LEFT, padx=(6, 4))
 
         for c in COLORS:
@@ -236,12 +248,17 @@ class AnnotationWindow:
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
 
         # ====================
-        # 自适应窗口大小
+        # 自适应窗口大小与居中显示
         # ====================
         min_w, min_h = 900, 120
-        win_w = max(min_w, image.width + 4)
-        win_h = max(min_h, image.height + 46)
-        root.geometry(f"{win_w}x{win_h}")
+        win_w = max(min_w, image.width + 2)
+        win_h = image.height + 44
+        
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        start_x = (screen_width - win_w) // 2
+        start_y = (screen_height - win_h) // 2
+        root.geometry(f"{win_w}x{win_h}+{start_x}+{start_y}")
 
         # ====================
         # 事件绑定
@@ -249,14 +266,34 @@ class AnnotationWindow:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Double-Button-1>", lambda e: root.destroy())
 
-        # 修复：将滚轮事件直接绑定在整个窗口上，解决焦点丢失导致失效的问题
         root.bind("<MouseWheel>", self.on_scroll)
-
         root.bind("<Control-z>", lambda e: self.undo())
         root.bind("<Control-c>", lambda e: self.copy())
         root.bind("<Control-s>", lambda e: self.save())
         root.bind("<Escape>", lambda e: root.destroy())
+
+        # ====================
+        # 核心修改点：强制夺取键盘焦点
+        # ====================
+        root.lift()                  # 确保窗口提到最上层
+        root.focus_force()           # 强制让整个窗口获取输入焦点
+        self.canvas.focus_set()      # 顺便让画布锁定焦点
+
+    # ====================
+    # 无边框窗口拖动实现
+    # ====================
+    def start_window_move(self, event):
+        self.drag_data["x"] = event.x
+        self.drag_data["y"] = event.y
+
+    def drag_window_move(self, event):
+        deltax = event.x - self.drag_data["x"]
+        deltay = event.y - self.drag_data["y"]
+        x = self.root.winfo_x() + deltax
+        y = self.root.winfo_y() + deltay
+        self.root.geometry(f"+{x}+{y}")
 
     def set_color(self, color):
         self.color = color
@@ -371,9 +408,9 @@ class AnnotationWindow:
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
             finally:
                 win32clipboard.CloseClipboard()
-            self.root.title("已复制到剪切板")
+            print("已复制到剪切板")
         except Exception as e:
-            self.root.title(f"复制失败: {e}")
+            print(f"复制失败: {e}")
 
     def save(self):
         try:
@@ -382,9 +419,9 @@ class AnnotationWindow:
             name = datetime.now().strftime("截图_%Y-%m-%d_%H-%M-%S.png")
             path = os.path.join(desktop, name)
             img.save(path)
-            self.root.title(f"已保存 {name}")
+            print(f"已保存 {name}")
         except Exception as e:
-            self.root.title(f"保存失败: {e}")
+            print(f"保存失败: {e}")
 
 
 def open_annotation(root, img):
@@ -394,7 +431,6 @@ def open_annotation(root, img):
 
 def start_capture(root):
     try:
-        # 修复：删除了这里的 root.deiconify()，让主窗口继续在后台完美隐身
         full_img = capture_screen()
 
         def on_done(cropped):
