@@ -1,1 +1,0 @@
-pyinstaller --noconsole --onefile --add-data "icon.ico;." -i "icon.ico" alt上下左右.py
