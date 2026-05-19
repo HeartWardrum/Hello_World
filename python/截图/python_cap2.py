@@ -28,6 +28,7 @@ import tkinter as tk
 from PIL import Image
 from PIL import ImageGrab
 from PIL import ImageTk
+from PIL import ImageDraw
 
 from pynput import keyboard
 
@@ -146,12 +147,89 @@ class RegionSelector:
         self.on_done(None)
 
 
+class ToastNotification:
+    """ 自动消失的提示框 """
+
+    def __init__(self, parent, message, duration=2000, bg_color="#2ecc71"):
+        self.parent = parent
+        self.message = message
+        self.duration = duration
+        self.bg_color = bg_color
+
+        # 创建提示窗口
+        self.toast = tk.Toplevel(parent)
+        self.toast.overrideredirect(True)
+        self.toast.attributes("-topmost", True)
+
+        # 设置样式
+        frame = tk.Frame(
+            self.toast,
+            bg=self.bg_color,
+            bd=0,
+            highlightthickness=0
+        )
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        label = tk.Label(
+            frame,
+            text=self.message,
+            bg=self.bg_color,
+            fg="white",
+            font=("微软雅黑", 12, "bold"),
+            padx=20,
+            pady=10
+        )
+        label.pack()
+
+        # 计算位置：在父窗口中央显示
+        self.toast.update_idletasks()
+
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+
+        toast_width = self.toast.winfo_width()
+        toast_height = self.toast.winfo_height()
+
+        x = parent_x + (parent_width - toast_width) // 2
+        y = parent_y + (parent_height - toast_height) // 2
+
+        self.toast.geometry(f"+{x}+{y}")
+
+        # 淡入效果
+        self.toast.attributes("-alpha", 0.0)
+        self.fade_in()
+
+        # 定时自动关闭
+        self.toast.after(self.duration, self.fade_out)
+
+    def fade_in(self, alpha=0.0):
+        """淡入动画"""
+        if alpha < 1.0:
+            alpha += 0.1
+            self.toast.attributes("-alpha", alpha)
+            self.toast.after(20, lambda: self.fade_in(alpha))
+        else:
+            self.toast.attributes("-alpha", 1.0)
+
+    def fade_out(self, alpha=1.0):
+        """淡出动画"""
+        if alpha > 0.0:
+            alpha -= 0.1
+            self.toast.attributes("-alpha", alpha)
+            self.toast.after(20, lambda: self.fade_out(alpha))
+        else:
+            self.toast.destroy()
+
+
 class AnnotationWindow:
     """ 负责展示裁剪后的图片并提供标注工具 """
 
     def __init__(self, root, image):
         self.root = root
-        self.image = image
+        self.original_image = image  # 保存原始图片
+        self.image = image.copy()  # 用于显示的图片副本
 
         self.tool = TOOL_BRUSH
         self.color = COLORS[0]
@@ -166,7 +244,10 @@ class AnnotationWindow:
         self.current_brush_items = []
         self.undo_stack = []
         self.topmost = True
-        
+
+        # 存储所有标注信息
+        self.annotations = []  # 每个元素: (type, coords, color, width)
+
         # 用于无边框窗口拖动的变量
         self.drag_data = {"x": 0, "y": 0}
 
@@ -236,12 +317,12 @@ class AnnotationWindow:
         # ====================
         # 图片区域
         # ====================
-        self.photo = ImageTk.PhotoImage(image)
+        self.photo = ImageTk.PhotoImage(self.image)
         canvas_frame = tk.Frame(root, bg="#222")
         canvas_frame.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(
-            canvas_frame, width=image.width, height=image.height,
+            canvas_frame, width=self.image.width, height=self.image.height,
             bd=0, highlightthickness=0, bg="#111"
         )
         self.canvas.pack(padx=1, pady=1)
@@ -251,9 +332,9 @@ class AnnotationWindow:
         # 自适应窗口大小与居中显示
         # ====================
         min_w, min_h = 900, 120
-        win_w = max(min_w, image.width + 2)
-        win_h = image.height + 44
-        
+        win_w = max(min_w, self.image.width + 2)
+        win_h = self.image.height + 44
+
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         start_x = (screen_width - win_w) // 2
@@ -277,9 +358,9 @@ class AnnotationWindow:
         # ====================
         # 核心修改点：强制夺取键盘焦点
         # ====================
-        root.lift()                  # 确保窗口提到最上层
-        root.focus_force()           # 强制让整个窗口获取输入焦点
-        self.canvas.focus_set()      # 顺便让画布锁定焦点
+        root.lift()  # 确保窗口提到最上层
+        root.focus_force()  # 强制让整个窗口获取输入焦点
+        self.canvas.focus_set()  # 顺便让画布锁定焦点
 
     # ====================
     # 无边框窗口拖动实现
@@ -323,12 +404,16 @@ class AnnotationWindow:
         items = self.undo_stack.pop()
         for item in items:
             self.canvas.delete(item)
+        # 同时从annotations中移除
+        if self.annotations:
+            self.annotations.pop()
 
     def clear(self):
         while self.undo_stack:
             items = self.undo_stack.pop()
             for item in items:
                 self.canvas.delete(item)
+        self.annotations.clear()
 
     def toggle_topmost(self):
         self.topmost = not self.topmost
@@ -381,18 +466,122 @@ class AnnotationWindow:
         if self.tool == TOOL_BRUSH:
             if self.current_brush_items:
                 self.undo_stack.append(self.current_brush_items)
+                # 记录画笔标注
+                self.annotations.append({
+                    'type': 'brush',
+                    'items': self.current_brush_items,
+                    'color': self.color,
+                    'width': self.draw_size
+                })
         else:
             if self.current_item:
                 self.undo_stack.append([self.current_item])
+                # 记录形状标注
+                coords = self.canvas.coords(self.current_item)
+                self.annotations.append({
+                    'type': self.tool,
+                    'coords': coords,
+                    'color': self.color,
+                    'width': self.draw_size
+                })
                 self.current_item = None
 
     def get_image(self):
-        self.root.update()
-        x = self.canvas.winfo_rootx()
-        y = self.canvas.winfo_rooty()
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        return ImageGrab.grab(bbox=(x, y, x + w, y + h))
+        """
+        通过PIL重新绘制图片和标注，避免ImageGrab截图黑屏问题
+        """
+        # 创建原始图片的副本
+        result_image = self.original_image.copy()
+        draw = ImageDraw.Draw(result_image)
+
+        # 根据annotations重新绘制所有标注
+        for annotation in self.annotations:
+            if annotation['type'] == 'brush':
+                # 画笔标注需要从canvas获取坐标
+                for item_id in annotation['items']:
+                    try:
+                        coords = self.canvas.coords(item_id)
+                        if len(coords) == 4:  # line有4个坐标
+                            draw.line(
+                                [(coords[0], coords[1]), (coords[2], coords[3])],
+                                fill=annotation['color'],
+                                width=annotation['width']
+                            )
+                    except:
+                        pass
+
+            elif annotation['type'] == 'rect':
+                coords = annotation['coords']
+                draw.rectangle(
+                    coords,
+                    outline=annotation['color'],
+                    width=annotation['width']
+                )
+
+            elif annotation['type'] == 'circle':
+                coords = annotation['coords']
+                draw.ellipse(
+                    coords,
+                    outline=annotation['color'],
+                    width=annotation['width']
+                )
+
+            elif annotation['type'] == 'arrow':
+                coords = annotation['coords']
+                # 画箭头线
+                draw.line(
+                    [(coords[0], coords[1]), (coords[2], coords[3])],
+                    fill=annotation['color'],
+                    width=annotation['width']
+                )
+                # 画箭头头部
+                self._draw_arrow_head(
+                    draw,
+                    (coords[0], coords[1]),
+                    (coords[2], coords[3]),
+                    annotation['color'],
+                    annotation['width']
+                )
+
+        return result_image
+
+    def _draw_arrow_head(self, draw, start, end, color, width):
+        """绘制箭头头部"""
+        import math
+
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.sqrt(dx ** 2 + dy ** 2)
+
+        if length == 0:
+            return
+
+        # 箭头大小
+        arrow_length = min(12, length / 2)
+        arrow_angle = math.radians(30)
+
+        # 计算箭头方向
+        angle = math.atan2(dy, dx)
+
+        # 计算箭头两个端点
+        angle1 = angle + math.pi - arrow_angle
+        angle2 = angle + math.pi + arrow_angle
+
+        x1 = end[0] + arrow_length * math.cos(angle1)
+        y1 = end[1] + arrow_length * math.sin(angle1)
+        x2 = end[0] + arrow_length * math.cos(angle2)
+        y2 = end[1] + arrow_length * math.sin(angle2)
+
+        # 画箭头头部
+        draw.polygon(
+            [end, (x1, y1), (x2, y2)],
+            fill=color
+        )
+
+    def show_toast(self, message, success=True):
+        """显示提示信息"""
+        bg_color = "#2ecc71" if success else "#e74c3c"
+        ToastNotification(self.root, message, duration=1500, bg_color=bg_color)
 
     def copy(self):
         try:
@@ -408,8 +597,13 @@ class AnnotationWindow:
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
             finally:
                 win32clipboard.CloseClipboard()
-            print("已复制到剪切板")
+
+            # 显示成功提示
+            self.show_toast("✓ 已复制到剪贴板", success=True)
+
         except Exception as e:
+            # 显示失败提示
+            self.show_toast(f"✗ 复制失败: {str(e)}", success=False)
             print(f"复制失败: {e}")
 
     def save(self):
@@ -419,8 +613,13 @@ class AnnotationWindow:
             name = datetime.now().strftime("截图_%Y-%m-%d_%H-%M-%S.png")
             path = os.path.join(desktop, name)
             img.save(path)
-            print(f"已保存 {name}")
+
+            # 显示成功提示
+            self.show_toast(f"✓ 已保存: {name}", success=True)
+
         except Exception as e:
+            # 显示失败提示
+            self.show_toast(f"✗ 保存失败: {str(e)}", success=False)
             print(f"保存失败: {e}")
 
 
