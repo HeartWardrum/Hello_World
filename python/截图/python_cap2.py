@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Win11 截图标注工具
+Win11 截图标注工具 (2026 UI 美化修正版)
 
 快捷键:
     Ctrl + Shift + Alt + X   截图
@@ -37,19 +37,32 @@ import win32clipboard
 
 HOTKEY = "<ctrl>+<shift>+<alt>+x"
 
-TOOL_ARROW  = "arrow"
-TOOL_RECT   = "rect"
+TOOL_ARROW = "arrow"
+TOOL_RECT = "rect"
 TOOL_CIRCLE = "circle"
-TOOL_BRUSH  = "brush"
+TOOL_BRUSH = "brush"
 
+# 2026 现代莫兰迪/流体色系：高级低饱和度
 COLORS = [
-    "#e74c3c",
-    "#3498db",
-    "#2ecc71",
-    "#f1c40f",
-    "#9b59b6",
-    "#000000"
+    "#FF5E5B",  # 珊瑚红
+    "#2E86AB",  # 静态蓝
+    "#20BF55",  # 薄荷绿
+    "#F6AE2D",  # 柔和金
+    "#A14DA0",  # 丁香紫
+    "#2B2D42"  # 深空灰
 ]
+
+# 现代极简风格主题配置
+THEME = {
+    "bg_main": "#F8F9FA",  # 浅色画布背景
+    "bg_toolbar": "#FFFFFF",  # 纯白悬浮工具栏
+    "text_main": "#2B2D42",  # 主文字颜色
+    "accent": "#4A90E2",  # 激活态蓝色
+    "accent_hover": "#357ABD",  # 悬停态蓝色
+    "border": "#E5E5E5",  # 细腻边框色
+    "font": ("Segoe UI", 10),
+    "font_bold": ("Segoe UI", 10, "bold")
+}
 
 
 def capture_screen():
@@ -62,7 +75,7 @@ def capture_screen():
 def get_primary_monitor():
     """返回主显示器 (left, top, width, height)"""
     with mss.MSS() as sct:
-        m = sct.monitors[1]   # monitors[0] 是所有屏合并区域，[1] 是主屏
+        m = sct.monitors[1]
         return m["left"], m["top"], m["width"], m["height"]
 
 
@@ -70,8 +83,8 @@ class RegionSelector:
     """全屏暗化并让用户框选截图区域"""
 
     def __init__(self, root, image, on_done):
-        self.root   = root
-        self.image  = image
+        self.root = root
+        self.image = image
         self.on_done = on_done
         self.start_x = self.start_y = self.rect = None
 
@@ -88,14 +101,15 @@ class RegionSelector:
 
         self.photo = ImageTk.PhotoImage(image)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
+
         self.canvas.create_text(
-            image.width // 2, 35,
-            text="拖动鼠标选择截图区域    右键点击取消",
-            fill="#ff3b30", font=("微软雅黑", 16, "bold")
+            image.width // 2, 40,
+            text="✦ 拖动鼠标选择区域  ·  右键取消 ✦",
+            fill="#FFFFFF", font=("Segoe UI", 14, "bold")
         )
 
-        self.canvas.bind("<ButtonPress-1>",   self.on_press)
-        self.canvas.bind("<B1-Motion>",       self.on_drag)
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.win.bind("<Button-3>", lambda e: self.cancel())
 
@@ -103,7 +117,7 @@ class RegionSelector:
         self.start_x, self.start_y = event.x, event.y
         self.rect = self.canvas.create_rectangle(
             event.x, event.y, event.x, event.y,
-            outline="red", width=2
+            outline="#007AFF", width=2
         )
 
     def on_drag(self, event):
@@ -129,37 +143,39 @@ class RegionSelector:
 class ToastNotification:
     """自动消失的提示框"""
 
-    def __init__(self, parent, message, duration=2000, bg_color="#2ecc71"):
+    def __init__(self, parent, message, duration=1500, bg_color="#2B2D42"):
         self.toast = tk.Toplevel(parent)
         self.toast.overrideredirect(True)
         self.toast.attributes("-topmost", True)
 
         frame = tk.Frame(self.toast, bg=bg_color, bd=0, highlightthickness=0)
         frame.pack(fill=tk.BOTH, expand=True)
+
         tk.Label(
             frame, text=message, bg=bg_color, fg="white",
-            font=("微软雅黑", 12, "bold"), padx=20, pady=10
+            font=("Segoe UI", 11, "bold"), padx=18, pady=8
         ).pack()
 
         self.toast.update_idletasks()
         pw, ph = parent.winfo_width(), parent.winfo_height()
         px, py = parent.winfo_rootx(), parent.winfo_rooty()
         tw, th = self.toast.winfo_width(), self.toast.winfo_height()
-        self.toast.geometry(f"+{px + (pw - tw)//2}+{py + (ph - th)//2}")
+
+        self.toast.geometry(f"+{px + (pw - tw) // 2}+{py + ph - th - 30}")
 
         self.toast.attributes("-alpha", 0.0)
         self._fade_in()
         self.toast.after(duration, self._fade_out)
 
     def _fade_in(self, alpha=0.0):
-        if alpha < 1.0:
-            self.toast.attributes("-alpha", min(alpha + 0.1, 1.0))
-            self.toast.after(20, lambda: self._fade_in(alpha + 0.1))
+        if alpha < 0.95:
+            self.toast.attributes("-alpha", min(alpha + 0.15, 0.95))
+            self.toast.after(15, lambda: self._fade_in(alpha + 0.15))
 
-    def _fade_out(self, alpha=1.0):
+    def _fade_out(self, alpha=0.95):
         if alpha > 0.0:
-            self.toast.attributes("-alpha", max(alpha - 0.1, 0.0))
-            self.toast.after(20, lambda: self._fade_out(alpha - 0.1))
+            self.toast.attributes("-alpha", max(alpha - 0.15, 0.0))
+            self.toast.after(15, lambda: self._fade_out(alpha - 0.15))
         else:
             self.toast.destroy()
 
@@ -168,100 +184,131 @@ class AnnotationWindow:
     """展示裁剪后的图片并提供标注工具"""
 
     def __init__(self, root, image):
-        self.root           = root
+        self.root = root
         self.original_image = image
-        self.image          = image.copy()
+        self.image = image.copy()
 
-        # 默认不选任何工具 → 左键拖窗
-        self.tool       = None
-        self.color      = COLORS[0]
-        self.draw_size  = 4
-        self.topmost    = True
+        self.tool = None
+        self.color = COLORS[0]
+        self.draw_size = 4
+        self.topmost = True
 
         self.start_x = self.start_y = None
-        self.last_x  = self.last_y  = None
-        self.current_item        = None
+        self.last_x = self.last_y = None
+        self.current_item = None
         self.current_brush_items = []
-        self.undo_stack          = []
-        self.annotations         = []
+        self.undo_stack = []
+        self.annotations = []
 
-        # 拖窗用（工具栏 & 画布共用逻辑）
-        self._drag_ox = self._drag_oy = 0   # 按下时窗口左上角屏幕坐标
-        self._press_rx = self._press_ry = 0  # 按下时鼠标在屏幕上的坐标
+        self._drag_ox = self._drag_oy = 0
+        self._press_rx = self._press_ry = 0
 
         # ====================
-        # 窗口
+        # 窗口样式基础
         # ====================
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        root.configure(bg="#2c3e50")
+        root.configure(bg=THEME["bg_main"])
 
         # ====================
         # 工具栏
         # ====================
-        toolbar = tk.Frame(root, bg="#2c3e50", height=42)
-        toolbar.pack(side=tk.TOP, fill=tk.X)
+        toolbar = tk.Frame(root, bg=THEME["bg_toolbar"], height=46,
+                           bd=0, highlightthickness=1, highlightbackground=THEME["border"])
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         toolbar.pack_propagate(False)
 
-        # 工具栏也可拖窗
-        toolbar.bind("<ButtonPress-1>",   self._tb_press)
-        toolbar.bind("<B1-Motion>",       self._tb_drag)
-
-        tk.Label(toolbar, text=" 颜色", bg="#2c3e50", fg="white",
-                 font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(6, 4))
+        drag_handle = tk.Label(toolbar, text=" ☰ ", bg=THEME["bg_toolbar"], fg="#A0A0A0", font=THEME["font"])
+        drag_handle.pack(side=tk.LEFT, padx=(8, 2))
+        drag_handle.bind("<ButtonPress-1>", self._tb_press)
+        drag_handle.bind("<B1-Motion>", self._tb_drag)
+        toolbar.bind("<ButtonPress-1>", self._tb_press)
+        toolbar.bind("<B1-Motion>", self._tb_drag)
 
         for c in COLORS:
-            box = tk.Frame(toolbar, bg=c, width=22, height=22,
-                           highlightbackground="#666", highlightthickness=1)
-            box.pack(side=tk.LEFT, padx=2)
-            box.pack_propagate(False)
+            box_container = tk.Frame(toolbar, bg=THEME["bg_toolbar"], width=26, height=26)
+            box_container.pack(side=tk.LEFT, padx=3)
+            box_container.pack_propagate(False)
+
+            box = tk.Frame(box_container, bg=c, bd=0, cursor="hand2")
+            box.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+            if not hasattr(self, 'color_boxes'): self.color_boxes = {}
+            self.color_boxes[c] = box_container
+
             box.bind("<Button-1>", lambda e, col=c: self.set_color(col))
 
+        self.create_sep(toolbar)
+
         self.tool_buttons = {}
-        for name, label in [(TOOL_ARROW, "箭头"), (TOOL_RECT, "矩形"),
-                             (TOOL_CIRCLE, "圆形"), (TOOL_BRUSH, "画笔")]:
+        tool_configs = [
+            (TOOL_BRUSH, " ✎  画笔 "),
+            (TOOL_ARROW, " ↗  箭头 "),
+            (TOOL_RECT, " ▱  矩形 "),
+            (TOOL_CIRCLE, " ◯  圆形 ")
+        ]
+
+        for name, label in tool_configs:
+            # 修复：将 -padding 改为原生 tkinter 的 padx 和 pady
             btn = tk.Button(
-                toolbar, text=label, bg="#34495e", fg="white",
-                relief=tk.FLAT, padx=8, pady=3,
-                command=lambda t=name: self.toggle_tool(t)
+                toolbar, text=label, bg=THEME["bg_toolbar"], fg=THEME["text_main"],
+                font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2",
+                padx=8, pady=4,
+                activebackground=THEME["border"], activeforeground=THEME["text_main"]
             )
             btn.pack(side=tk.LEFT, padx=2)
+            btn.configure(command=lambda t=name: self.toggle_tool(t))
+
+            btn.bind("<Enter>", lambda e, b=btn, n=name: self._on_btn_hover(b, n, True))
+            btn.bind("<Leave>", lambda e, b=btn, n=name: self._on_btn_hover(b, n, False))
+
             self.tool_buttons[name] = btn
 
-        tk.Label(toolbar, text="粗细", bg="#2c3e50", fg="white").pack(side=tk.LEFT, padx=(12, 4))
-        self.size_label = tk.Label(toolbar, text=str(self.draw_size),
-                                   bg="#34495e", fg="white", width=3)
-        self.size_label.pack(side=tk.LEFT)
+        self.create_sep(toolbar)
 
-        tk.Button(toolbar, text="撤销", bg="#d35400", fg="white",
-                  relief=tk.FLAT, command=self.undo).pack(side=tk.LEFT, padx=(12, 2))
-        tk.Button(toolbar, text="清除", bg="#c0392b", fg="white",
-                  relief=tk.FLAT, command=self.clear).pack(side=tk.LEFT, padx=2)
+        tk.Label(toolbar, text="粗细", bg=THEME["bg_toolbar"], fg="#777777", font=THEME["font"]).pack(side=tk.LEFT,
+                                                                                                      padx=(4, 4))
+        self.size_label = tk.Label(toolbar, text=str(self.draw_size), bg=THEME["bg_main"], fg=THEME["text_main"],
+                                   font=THEME["font_bold"], width=3, height=1, bd=0)
+        self.size_label.pack(side=tk.LEFT, padx=2)
 
-        self.top_btn = tk.Button(toolbar, text="取消置顶", bg="#8e44ad", fg="white",
-                                 relief=tk.FLAT, command=self.toggle_topmost)
-        self.top_btn.pack(side=tk.LEFT, padx=2)
+        self.top_btn = tk.Button(toolbar, text=" 固 定 ", bg=THEME["bg_toolbar"], fg="#8E44AD",
+                                 font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        self.top_btn.pack(side=tk.RIGHT, padx=4)
+        self.top_btn.configure(command=self.toggle_topmost)
+
+        btn_clear = tk.Button(toolbar, text=" 清空 ", bg=THEME["bg_toolbar"], fg="#E74C3C",
+                              font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        btn_clear.pack(side=tk.RIGHT, padx=2)
+        btn_clear.configure(command=self.clear)
+
+        btn_undo = tk.Button(toolbar, text=" 撤销 ", bg=THEME["bg_toolbar"], fg="#D35400",
+                             font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        btn_undo.pack(side=tk.RIGHT, padx=2)
+        btn_undo.configure(command=self.undo)
+
+        self.refresh_color_selector()
 
         # ====================
-        # 画布
+        # 画布区域
         # ====================
         self.photo = ImageTk.PhotoImage(self.image)
-        canvas_frame = tk.Frame(root, bg="#222")
+        canvas_frame = tk.Frame(root, bg=THEME["bg_main"])
         canvas_frame.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(
             canvas_frame, width=self.image.width, height=self.image.height,
-            bd=0, highlightthickness=0, bg="#111"
+            bd=0, highlightthickness=0, bg=THEME["bg_main"]
         )
-        self.canvas.pack(padx=1, pady=1)
+        self.canvas.pack(padx=0, pady=0)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
 
         # ====================
         # 居中到主屏
         # ====================
-        min_w = 900
-        win_w = max(min_w, self.image.width + 2)
-        win_h = self.image.height + 44
+        min_w = 720
+        win_w = max(min_w, self.image.width)
+        win_h = self.image.height + 46
         ml, mt, mw, mh = get_primary_monitor()
         sx = ml + (mw - win_w) // 2
         sy = mt + (mh - win_h) // 2
@@ -270,27 +317,39 @@ class AnnotationWindow:
         # ====================
         # 事件绑定
         # ====================
-        self.canvas.bind("<ButtonPress-1>",   self.on_press)
-        self.canvas.bind("<B1-Motion>",       self.on_drag)
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Double-Button-1>", lambda e: root.destroy())
 
-        root.bind("<MouseWheel>",  self.on_scroll)
-        root.bind("<Control-z>",   lambda e: self.undo())
-        root.bind("<Control-c>",   lambda e: self.copy())
-        root.bind("<Control-s>",   lambda e: self.save())
-        root.bind("<Escape>",      lambda e: root.destroy())
+        root.bind("<MouseWheel>", self.on_scroll)
+        root.bind("<Control-z>", lambda e: self.undo())
+        root.bind("<Control-c>", lambda e: self.copy())
+        root.bind("<Control-s>", lambda e: self.save())
+        root.bind("<Escape>", lambda e: root.destroy())
 
         root.lift()
         root.focus_force()
         self.canvas.focus_set()
 
+    def create_sep(self, parent):
+        sep = tk.Frame(parent, bg=THEME["border"], width=1, height=20)
+        sep.pack(side=tk.LEFT, padx=8)
+
+    def _on_btn_hover(self, btn, name, is_enter):
+        if self.tool == name:
+            return
+        if is_enter:
+            btn.configure(bg=THEME["border"])
+        else:
+            btn.configure(bg=THEME["bg_toolbar"])
+
     # ──────────────────────────────────────────
     # 工具栏拖窗
     # ──────────────────────────────────────────
     def _tb_press(self, event):
-        self._drag_ox  = self.root.winfo_x()
-        self._drag_oy  = self.root.winfo_y()
+        self._drag_ox = self.root.winfo_x()
+        self._drag_oy = self.root.winfo_y()
         self._press_rx = event.x_root
         self._press_ry = event.y_root
 
@@ -300,19 +359,17 @@ class AnnotationWindow:
         self.root.geometry(f"+{x}+{y}")
 
     # ──────────────────────────────────────────
-    # 画布左键：无工具=拖窗，有工具=画图
+    # 画布左键
     # ──────────────────────────────────────────
     def on_press(self, event):
-        # 记录按下时窗口位置和鼠标屏幕位置（拖窗备用）
-        self._drag_ox  = self.root.winfo_x()
-        self._drag_oy  = self.root.winfo_y()
+        self._drag_ox = self.root.winfo_x()
+        self._drag_oy = self.root.winfo_y()
         self._press_rx = event.x_root
         self._press_ry = event.y_root
 
         if self.tool is None:
-            return  # 拖窗模式，什么都不初始化
+            return
 
-        # 画图模式
         self.start_x, self.start_y = event.x, event.y
         if self.tool == TOOL_BRUSH:
             self.current_brush_items = []
@@ -322,13 +379,11 @@ class AnnotationWindow:
 
     def on_drag(self, event):
         if self.tool is None:
-            # 拖窗
             x = self._drag_ox + (event.x_root - self._press_rx)
             y = self._drag_oy + (event.y_root - self._press_ry)
             self.root.geometry(f"+{x}+{y}")
             return
 
-        # 画图
         if self.tool == TOOL_BRUSH:
             item = self.canvas.create_line(
                 self.last_x, self.last_y, event.x, event.y,
@@ -369,18 +424,21 @@ class AnnotationWindow:
                 self.current_item = None
 
     # ──────────────────────────────────────────
-    # 工具切换（再次点击取消选中）
+    # 工具切换
     # ──────────────────────────────────────────
     def toggle_tool(self, tool):
         if self.tool == tool:
-            self.tool = None          # 取消选中 → 回到拖窗模式
+            self.tool = None
         else:
             self.tool = tool
         self._refresh_tool_buttons()
 
     def _refresh_tool_buttons(self):
         for name, btn in self.tool_buttons.items():
-            btn.configure(bg="#1abc9c" if name == self.tool else "#34495e")
+            if name == self.tool:
+                btn.configure(bg=THEME["accent"], fg="white")
+            else:
+                btn.configure(bg=THEME["bg_toolbar"], fg=THEME["text_main"])
 
     # ──────────────────────────────────────────
     # 辅助
@@ -402,6 +460,14 @@ class AnnotationWindow:
 
     def set_color(self, color):
         self.color = color
+        self.refresh_color_selector()
+
+    def refresh_color_selector(self):
+        for c, box_container in self.color_boxes.items():
+            if c == self.color:
+                box_container.configure(highlightbackground=THEME["accent"], highlightthickness=1.5)
+            else:
+                box_container.configure(highlightbackground=THEME["bg_toolbar"], highlightthickness=0)
 
     def on_scroll(self, event):
         self.draw_size = max(1, min(30, self.draw_size + (1 if event.delta > 0 else -1)))
@@ -424,11 +490,12 @@ class AnnotationWindow:
     def toggle_topmost(self):
         self.topmost = not self.topmost
         self.root.attributes("-topmost", self.topmost)
-        self.top_btn.config(text="取消置顶" if self.topmost else "窗口置顶")
+        self.top_btn.config(text=" 已固定 " if self.topmost else " 固 定 ",
+                            fg="#8E44AD" if self.topmost else "#A0A0A0")
 
     def get_image(self):
         result = self.original_image.copy()
-        draw   = ImageDraw.Draw(result)
+        draw = ImageDraw.Draw(result)
 
         for ann in self.annotations:
             if ann['type'] == 'brush':
@@ -458,9 +525,9 @@ class AnnotationWindow:
         length = math.hypot(dx, dy)
         if length == 0:
             return
-        arrow_len   = min(12, length / 2)
-        angle       = math.atan2(dy, dx)
-        spread      = math.radians(30)
+        arrow_len = min(12, length / 2)
+        angle = math.atan2(dy, dx)
+        spread = math.radians(30)
         pts = [end]
         for a in (angle + math.pi - spread, angle + math.pi + spread):
             pts.append((end[0] + arrow_len * math.cos(a),
@@ -468,8 +535,8 @@ class AnnotationWindow:
         draw.polygon(pts, fill=color)
 
     def show_toast(self, message, success=True):
-        ToastNotification(self.root, message, duration=1500,
-                          bg_color="#2ecc71" if success else "#e74c3c")
+        bg = "#2B2D42" if success else "#E74C3C"
+        ToastNotification(self.root, message, duration=1500, bg_color=bg)
 
     def copy(self):
         try:
@@ -483,18 +550,18 @@ class AnnotationWindow:
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
             finally:
                 win32clipboard.CloseClipboard()
-            self.show_toast("✓ 已复制到剪贴板")
+            self.show_toast("✦ 已成功复制到剪贴板")
         except Exception as e:
-            self.show_toast(f"✗ 复制失败: {e}", success=False)
+            self.show_toast(f"✕ 复制失败: {e}", success=False)
 
     def save(self):
         try:
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-            name    = datetime.now().strftime("截图_%Y-%m-%d_%H-%M-%S.png")
+            name = datetime.now().strftime("Screenshot_%Y%m%d_%H%M%S.png")
             self.get_image().save(os.path.join(desktop, name))
-            self.show_toast(f"✓ 已保存: {name}")
+            self.show_toast(f"✦ 已保存至桌面: {name}")
         except Exception as e:
-            self.show_toast(f"✗ 保存失败: {e}", success=False)
+            self.show_toast(f"✕ 保存失败: {e}", success=False)
 
 
 # ──────────────────────────────────────────────────
@@ -516,8 +583,10 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
-    print("Win11截图工具已启动")
-    print("快捷键: Ctrl+Shift+Alt+X")
+    print("====================================")
+    print("  Win11 极简截图工具已完美激活")
+    print("  快捷键: Ctrl + Shift + Alt + X")
+    print("====================================")
 
     def hotkey_thread():
         with keyboard.GlobalHotKeys({
