@@ -5,7 +5,11 @@ using System.Windows.Forms;
 
 public class VimParser {
     private const int WH_KEYBOARD_LL = 13;
+    private const uint LLKHF_EXTENDED = 0x01;
     private const uint LLKHF_INJECTED = 0x10;
+    
+    private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
 
     [DllImport("user32.dll")]
     private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -17,16 +21,16 @@ public class VimParser {
     private static extern IntPtr GetModuleHandle(string lpModuleName);
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
     private static IntPtr _hookID = IntPtr.Zero;
     private static LowLevelKeyboardProc _proc = HookCallback;
 
-    // 精确的状态追踪机制
-    private static bool _physicalLAltDown = false;
-    private static bool _virtualLAltReleased = false;
+    private static bool _logicalAltReleased = false;
 
-    // 记录各按键是否处于映射为方向键的状态
+    // 精确追踪每个按键是否处于被映射的状态
     private static bool _iIsArrow = false;
     private static bool _jIsArrow = false;
     private static bool _kIsArrow = false;
@@ -51,10 +55,9 @@ public class VimParser {
     private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
         if (nCode >= 0) {
             int vkCode = Marshal.ReadInt32(lParam);
-            // 偏移 8 字节读取 flags
             int flags = Marshal.ReadInt32(lParam, 8);
             
-            // 核心修复：忽略由 keybd_event 注入的模拟按键，防止引发系统状态机混乱
+            // 忽略我们自己注入的按键，防止无限死循环
             if ((flags & LLKHF_INJECTED) != 0) {
                 return CallNextHookEx(_hookID, nCode, wParam, lParam);
             }
@@ -62,58 +65,81 @@ public class VimParser {
             bool isKeyDown = (wParam == (IntPtr)0x0100 || wParam == (IntPtr)0x0104);
             bool isKeyUp = (wParam == (IntPtr)0x0101 || wParam == (IntPtr)0x0105);
 
-            // 监听真实的物理 左 Alt 键 (VK_LMENU = 0xA4)
-            if (vkCode == 0xA4) {
-                if (isKeyDown) {
-                    _physicalLAltDown = true;
-                } else if (isKeyUp) {
-                    _physicalLAltDown = false;
-                    _virtualLAltReleased = false; 
-                }
+            // 识别左侧 Alt (包含 0xA4 和可能被系统转换的 0x12)
+            bool isLAlt = (vkCode == 0xA4) || (vkCode == 0x12 && (flags & LLKHF_EXTENDED) == 0);
+
+            // 终极防卡死保险：只要系统收到物理左 Alt 的松开事件，强制清空所有 Alt 状态
+            if (isLAlt && isKeyUp) {
+                _logicalAltReleased = false;
+                keybd_event(0xA4, 0x38, KEYEVENTF_KEYUP, 0); // 左 Alt 释放
+                keybd_event(0x12, 0x38, KEYEVENTF_KEYUP, 0); // 宽泛 Alt 释放
             }
 
-            // 处理 I (0x49), J (0x4A), K (0x4B), L (0x4C)
-            if (vkCode == 0x49 || vkCode == 0x4A || vkCode == 0x4B || vkCode == 0x4C) {
+            bool isI = (vkCode == 0x49);
+            bool isJ = (vkCode == 0x4A);
+            bool isK = (vkCode == 0x4B);
+            bool isL = (vkCode == 0x4C);
+
+            if (isI || isJ || isK || isL) {
                 if (isKeyDown) {
-                    if (_physicalLAltDown) {
-                        if (!_virtualLAltReleased) {
-                            // 防菜单焦点夺取的 Dummy 按键 (0xFC)
-                            keybd_event(0xFC, 0, 0, 0); 
-                            keybd_event(0xFC, 0, 2, 0); 
-                            // 逻辑上释放左 Alt 键，防止变成 Alt+方向键
-                            keybd_event(0xA4, 0, 2, 0); 
-                            _virtualLAltReleased = true;
+                    // 穿透系统消息队列，直接探测硬件层面你手指是否贴在左 Alt 上
+                    bool physicalAltDown = (GetAsyncKeyState(0xA4) & 0x8000) != 0;
+                    
+                    // 判断当前按键是否需要被当作方向键
+                    bool treatAsArrow = false;
+                    if (isI && (physicalAltDown || _iIsArrow)) { treatAsArrow = true; _iIsArrow = true; }
+                    if (isJ && (physicalAltDown || _jIsArrow)) { treatAsArrow = true; _jIsArrow = true; }
+                    if (isK && (physicalAltDown || _kIsArrow)) { treatAsArrow = true; _kIsArrow = true; }
+                    if (isL && (physicalAltDown || _lIsArrow)) { treatAsArrow = true; _lIsArrow = true; }
+
+                    if (treatAsArrow) {
+                        if (physicalAltDown && !_logicalAltReleased) {
+                            keybd_event(0xFC, 0, 0, 0); // 防系统菜单拦截 Dummy Down
+                            keybd_event(0xFC, 0, KEYEVENTF_KEYUP, 0); // Dummy Up
+                            keybd_event(0xA4, 0x38, KEYEVENTF_KEYUP, 0); // 逻辑上释放左 Alt
+                            keybd_event(0x12, 0x38, KEYEVENTF_KEYUP, 0); 
+                            _logicalAltReleased = true;
                         }
 
                         byte target = 0;
-                        if (vkCode == 0x49) { target = 0x26; _iIsArrow = true; } // Up
-                        if (vkCode == 0x4A) { target = 0x25; _jIsArrow = true; } // Left
-                        if (vkCode == 0x4B) { target = 0x28; _kIsArrow = true; } // Down
-                        if (vkCode == 0x4C) { target = 0x27; _lIsArrow = true; } // Right
+                        if (isI) target = 0x26;
+                        if (isJ) target = 0x25;
+                        if (isK) target = 0x28;
+                        if (isL) target = 0x27;
 
-                        keybd_event(target, 0, 0, 0);
-                        return (IntPtr)1; // 拦截按键
+                        keybd_event(target, 0, KEYEVENTF_EXTENDEDKEY, 0);
+                        return (IntPtr)1; // 吞掉原始的 IKJL
                     }
                 } 
                 else if (isKeyUp) {
                     bool wasArrow = false;
                     byte target = 0;
 
-                    if (vkCode == 0x49 && _iIsArrow) { target = 0x26; _iIsArrow = false; wasArrow = true; }
-                    if (vkCode == 0x4A && _jIsArrow) { target = 0x25; _jIsArrow = false; wasArrow = true; }
-                    if (vkCode == 0x4B && _kIsArrow) { target = 0x28; _kIsArrow = false; wasArrow = true; }
-                    if (vkCode == 0x4C && _lIsArrow) { target = 0x27; _lIsArrow = false; wasArrow = true; }
+                    if (isI && _iIsArrow) { target = 0x26; _iIsArrow = false; wasArrow = true; }
+                    if (isJ && _jIsArrow) { target = 0x25; _jIsArrow = false; wasArrow = true; }
+                    if (isK && _kIsArrow) { target = 0x28; _kIsArrow = false; wasArrow = true; }
+                    if (isL && _lIsArrow) { target = 0x27; _lIsArrow = false; wasArrow = true; }
 
                     if (wasArrow) {
-                        // 释放对应的方向键
-                        keybd_event(target, 0, 2, 0);
+                        keybd_event(target, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
 
-                        // 核心修复：仅当用户仍然按住物理左 Alt 且没有其他映射键未释放时，才逻辑上恢复 Alt
-                        if (_physicalLAltDown && !_iIsArrow && !_jIsArrow && !_kIsArrow && !_lIsArrow) {
-                            keybd_event(0xA4, 0, 0, 0);
-                            _virtualLAltReleased = false;
+                        // 只有在没有任何方向键残留时，才去判断是否恢复 Alt
+                        if (!_iIsArrow && !_jIsArrow && !_kIsArrow && !_lIsArrow) {
+                            // 再次直接读取硬件探测
+                            bool physicalAltDown = (GetAsyncKeyState(0xA4) & 0x8000) != 0;
+                            if (physicalAltDown) {
+                                // 硬件证明你手指还在 Alt 上，恢复逻辑按下状态
+                                keybd_event(0xA4, 0x38, 0, 0);
+                                keybd_event(0x12, 0x38, 0, 0);
+                                _logicalAltReleased = false;
+                            } else {
+                                // 硬件证明你手指已经松开了，下达死命令彻底清理 Alt 状态
+                                keybd_event(0xA4, 0x38, KEYEVENTF_KEYUP, 0);
+                                keybd_event(0x12, 0x38, KEYEVENTF_KEYUP, 0);
+                                _logicalAltReleased = false;
+                            }
                         }
-                        return (IntPtr)1; // 拦截按键
+                        return (IntPtr)1;
                     }
                 }
             }
