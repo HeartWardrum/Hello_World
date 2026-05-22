@@ -2,316 +2,164 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Markdown 笔记本 - Typora Pro 版</title>
+    <title>Markdown 知识库</title>
     <link rel="stylesheet" href="https://unpkg.com/vditor@3.11.0/dist/index.css"/>
     <style>
-        /* ========== Typora Night 全局暗黑变量 ========== */
+        /* ========== 全局变量 (保持 Typora 暗黑配色) ========== */
         :root {
-            --bg-main: #20252b;       /* 核心编辑区背景（Typora碳黑） */
-            --bg-sidebar: #1b1f23;    /* 侧边栏稍深色 */
-            --border-color: #333842;  /* 细边框颜色 */
-            --text-main: #bcc2cd;     /* 舒适主文本色 */
-            --text-light: #7d8492;    /* 隐蔽说明文字 */
-            --text-bright: #ffffff;   /* 纯白高亮 */
-            --accent-color: #4fc3f7;  /* 冰蓝主题强调色 */
-            --tree-hover: #2c313c;    /* 树节点悬停色 */
-            --tree-active: #3e4451;   /* 选中活动节点 */
+            --bg-main: #20252b;
+            --bg-sidebar: #1b1f23;
+            --border-color: #333842;
+            --text-main: #bcc2cd;
+            --text-light: #7d8492;
+            --text-bright: #ffffff;
+            --accent-color: #4fc3f7;
+            --tree-hover: #2c313c;
+            --tree-active: #3e4451;
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
-            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
             height: 100vh;
             display: flex;
             background: var(--bg-main);
             color: var(--text-main);
-        }
-        
-        /* ========== 侧边栏样式 ========== */
-        .sidebar {
-            width: 320px;
-            background: var(--bg-sidebar);
-            display: flex;
-            flex-direction: column;
-            border-right: 1px solid var(--border-color);
-        }
-        
-        .sidebar-header {
-            padding: 16px;
-            border-bottom: 1px solid var(--border-color);
-        }
-        
-        .sidebar-header h3 {
-            font-size: 15px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: var(--accent-color);
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            overflow: hidden;
         }
 
-        /* 搜索框样式 */
-        .search-container {
-            margin-bottom: 12px;
+        /* ========== 🏠 起始页样式 (新加入) ========== */
+        .home-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--bg-main); z-index: 5000;
+            display: flex; align-items: center; justify-content: center;
+            transition: opacity 0.3s ease;
         }
-        .search-input {
-            width: 100%;
-            padding: 6px 10px;
-            background: var(--bg-main);
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            color: var(--text-bright);
-            font-size: 13px;
-        }
-        .search-input:focus {
-            outline: none;
-            border-color: var(--accent-color);
-        }
+        .home-screen.hidden { opacity: 0; pointer-events: none; }
         
-        .btn-primary {
-            width: 100%;
-            padding: 8px 12px;
-            background: #238636;
-            color: #ffffff;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 500;
-            margin-bottom: 8px;
-            transition: background 0.2s;
+        .home-box {
+            width: 100%; max-width: 600px; padding: 40px;
+            background: var(--bg-sidebar); border: 1px solid var(--border-color);
+            border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
+        .home-box h1 { color: var(--text-bright); text-align: center; margin-bottom: 30px; font-weight: 500;}
+        
+        .path-input-group { display: flex; gap: 10px; margin-bottom: 30px; }
+        .path-input-group input {
+            flex: 1; padding: 12px 16px; font-size: 14px;
+            background: var(--bg-main); border: 1px solid var(--border-color);
+            border-radius: 6px; color: #fff;
+        }
+        .path-input-group input:focus { outline: none; border-color: var(--accent-color); }
+        .path-input-group button {
+            padding: 0 20px; font-size: 14px; border: none; border-radius: 6px;
+            cursor: pointer; font-weight: 500; transition: background 0.2s;
+        }
+        .btn-primary { background: #238636; color: #fff; }
         .btn-primary:hover { background: #2ea043; }
+        .btn-secondary { background: #21262d; color: var(--text-main); border: 1px solid var(--border-color); }
+        .btn-secondary:hover { background: var(--border-color); color: var(--text-bright); }
         
-        .btn-secondary {
-            width: 48%;
-            padding: 6px 12px;
-            background: #21262d;
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
+        .favorites-list h4 { color: var(--text-light); margin-bottom: 12px; font-size: 13px; font-weight: normal;}
+        .fav-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; background: var(--bg-main); border-radius: 6px;
+            margin-bottom: 8px; cursor: pointer; border: 1px solid transparent;
         }
-        .btn-secondary:hover { background: var(--border-color); }
+        .fav-item:hover { border-color: var(--border-color); background: var(--tree-active); }
+        .fav-path { color: var(--text-bright); font-family: monospace; font-size: 13px; }
+        .fav-remove { color: var(--text-light); background: none; border: none; cursor: pointer; padding: 4px; }
+        .fav-remove:hover { color: #f85149; }
+
+        /* ========== 侧边栏及编辑器主体样式 (与之前相同) ========== */
+        .sidebar { width: 320px; background: var(--bg-sidebar); display: flex; flex-direction: column; border-right: 1px solid var(--border-color); }
+        .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border-color); }
+        .sidebar-header h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; color: var(--accent-color); }
+        .search-container { margin-bottom: 12px; }
+        .search-input { width: 100%; padding: 6px 10px; background: var(--bg-main); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-bright); font-size: 13px; }
+        .button-group { display: flex; gap: 8px; margin-top: 8px; }
+        .button-group button { flex: 1; padding: 6px; font-size: 12px; }
         
-        .button-group {
-            display: flex;
-            gap: 8px;
-        }
-        
-        .file-tree {
-            flex: 1;
-            overflow-y: auto;
-            padding: 8px 0;
-        }
-        
-        .tree-node-content {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 6px 12px;
-            cursor: pointer;
-            transition: background 0.2s;
-            border-left: 3px solid transparent;
-        }
+        .file-tree { flex: 1; overflow-y: auto; padding: 8px 0; }
+        .tree-node-content { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
         .tree-node-content:hover { background: var(--tree-hover); }
-        .tree-node-content.active {
-            background: var(--tree-active);
-            border-left-color: var(--accent-color);
-        }
+        .tree-node-content.active { background: var(--tree-active); border-left-color: var(--accent-color); }
         .tree-node-content.active .name { color: var(--text-bright); font-weight: 500; }
-        
-        .tree-node-label {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex: 1;
-            overflow: hidden;
-        }
+        .tree-node-label { display: flex; align-items: center; gap: 8px; flex: 1; overflow: hidden; }
         .tree-node-label .icon { font-size: 15px; width: 18px; text-align: center; }
-        .tree-node-label .name {
-            flex: 1;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            font-size: 13px;
-            color: var(--text-main);
-        }
-        
+        .tree-node-label .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
         .file-actions { display: flex; gap: 4px; opacity: 0; }
         .tree-node-content:hover .file-actions { opacity: 1; }
-        
-        .action-btn {
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-size: 12px;
-            padding: 2px 4px;
-            border-radius: 4px;
-            color: var(--text-light);
-        }
+        .action-btn { background: none; border: none; cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 4px; color: var(--text-light); }
         .action-btn:hover { background: var(--tree-active); color: var(--text-bright); }
-        .action-btn.delete:hover { color: #f85149; }
-        
         .tree-node-children { padding-left: 16px; }
         
-        /* ========== 主编辑区样式 ========== */
-        .main {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background: var(--bg-main);
-        }
+        .main { flex: 1; display: flex; flex-direction: column; background: var(--bg-main); }
+        .editor-header { padding: 12px 20px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
+        .current-file { font-size: 13px; color: var(--text-bright); font-weight: 500; }
+        .tool-btn { padding: 6px 14px; background: #21262d; color: var(--text-main); border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer; font-size: 12px; }
+        .tool-btn:hover { background: var(--border-color); border-color: var(--accent-color); color: var(--text-bright); }
+        .tool-btn.active { background: #1f6feb; border-color: #58a6ff; color: #ffffff; }
+        .editor-container { flex: 1; min-height: 0; }
         
-        .editor-header {
-            padding: 12px 20px;
-            background: var(--bg-sidebar);
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .current-file {
-            font-size: 13px;
-            color: var(--text-bright);
-            font-weight: 500;
-        }
-        
-        .tool-btn {
-            padding: 6px 14px;
-            background: #21262d;
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-        .tool-btn:hover {
-            background: var(--border-color);
-            border-color: var(--accent-color);
-            color: var(--text-bright);
-        }
-        .tool-btn.active {
-            background: #1f6feb;
-            border-color: #58a6ff;
-            color: #ffffff;
-        }
-        
-        .editor-container {
-            flex: 1;
-            min-height: 0;
-        }
-        
-        /* ========== Vditor 样式深度重置（强力注入 Typora 配色） ========== */
-        .vditor {
-            border: none !important;
-            --panel-background-color: var(--bg-main) !important;
-            --toolbar-background-color: var(--bg-sidebar) !important;
-            --toolbar-icon-color: var(--text-main) !important;
-            --toolbar-icon-hover-color: var(--accent-color) !important;
-            --toolbar-border-color: var(--border-color) !important;
-            --textarea-background-color: var(--bg-main) !important;
-            --textarea-text-color: var(--text-main) !important;
-            --content-background-color: var(--bg-main) !important;
-        }
-        
-        /* 编辑预览区域细节修正 */
-        .vditor-reset {
-            background-color: var(--bg-main) !important;
-            color: var(--text-main) !important;
-            font-size: 15px !important;
-            line-height: 1.6 !important;
-        }
-        .vditor-reset h1, .vditor-reset h2, .vditor-reset h3, 
-        .vditor-reset h4, .vditor-reset h5, .vditor-reset h6 {
-            color: var(--text-bright) !important;
-            font-weight: 600 !important;
-            margin-top: 24px !important;
-            margin-bottom: 12px !important;
-        }
-        .vditor-reset h1 { border-bottom: 1px solid var(--border-color); padding-bottom: 8px; }
-        .vditor-reset h2 { border-bottom: 1px solid var(--border-color); padding-bottom: 4px; }
-        
-        .vditor-reset code {
-            background-color: #282c34 !important;
-            color: #e06c75 !important;
-            padding: 2px 6px !important;
-            border-radius: 4px !important;
-            font-family: Consolas, Monaco, monospace !important;
-        }
-        .vditor-reset pre {
-            background-color: #282c34 !important;
-            border: 1px solid var(--border-color) !important;
-            border-radius: 6px !important;
-        }
-        .vditor-reset pre code { background-color: transparent !important; color: #abb2bf !important; }
-        .vditor-reset blockquote {
-            border-left: 4px solid var(--accent-color) !important;
-            background-color: #252b33 !important;
-            color: #9da5b4 !important;
-            padding: 10px 15px !important;
-        }
-        
-        /* 滚动条 */
+        /* 编辑器深度适配 */
+        .vditor { border: none !important; --panel-background-color: var(--bg-main) !important; --toolbar-background-color: var(--bg-sidebar) !important; --toolbar-icon-color: var(--text-main) !important; --toolbar-icon-hover-color: var(--accent-color) !important; --toolbar-border-color: var(--border-color) !important; --textarea-background-color: var(--bg-main) !important; --textarea-text-color: var(--text-main) !important; --content-background-color: var(--bg-main) !important; }
+        .vditor-reset { background-color: var(--bg-main) !important; color: var(--text-main) !important; font-size: 15px !important; line-height: 1.6 !important; }
+        .vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4 { color: var(--text-bright) !important; font-weight: 600 !important; margin-top: 24px !important; margin-bottom: 12px !important; }
+        .vditor-reset code { background-color: #282c34 !important; color: #e06c75 !important; padding: 2px 6px !important; border-radius: 4px !important; }
+        .vditor-reset pre { background-color: #282c34 !important; border: 1px solid var(--border-color) !important; border-radius: 6px !important; }
+        .vditor-reset blockquote { border-left: 4px solid var(--accent-color) !important; background-color: #252b33 !important; color: #9da5b4 !important; padding: 10px 15px !important; }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: var(--bg-sidebar); }
         ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--accent-color); }
 
         /* 对话框 */
-        .dialog-overlay {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.6); display: flex; align-items: center; justify-content: center; z-index: 3000;
-        }
-        .dialog {
-            background: var(--bg-sidebar); border: 1px solid var(--border-color);
-            border-radius: 8px; padding: 20px; min-width: 320px;
-        }
-        .dialog h4 { margin-bottom: 12px; color: var(--text-bright); }
-        .dialog input {
-            width: 100%; padding: 8px; background: var(--bg-main);
-            border: 1px solid var(--border-color); border-radius: 4px; color: #fff; margin-bottom: 16px;
-        }
+        .dialog-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.6); display: flex; align-items: center; justify-content: center; z-index: 6000; }
+        .dialog { background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; min-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .dialog h4 { margin-bottom: 12px; color: var(--text-bright); font-weight: 500;}
+        .dialog input { width: 100%; padding: 8px; background: var(--bg-main); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; margin-bottom: 16px; }
         .dialog input:focus { outline: none; border-color: var(--accent-color); }
         .dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; }
-        .dialog-buttons button { padding: 6px 14px; border-radius: 4px; cursor: pointer; border: none; }
+        .dialog-buttons button { padding: 6px 14px; border-radius: 4px; cursor: pointer; border: none; font-size: 13px;}
         .dialog-buttons .confirm { background: #238636; color: #fff; }
         .dialog-buttons .cancel { background: #30363d; color: var(--text-main); }
     </style>
 </head>
 <body>
+    <div id="homeScreen" class="home-screen">
+        <div class="home-box">
+            <h1>📖 开启你的知识库</h1>
+            <div class="path-input-group">
+                <input type="text" id="rootPathInput" placeholder="请输入本地文件夹绝对路径，如: D:\文档\笔记">
+                <button id="openRootBtn" class="btn-primary">打开</button>
+                <button id="favRootBtn" class="btn-secondary">⭐ 收藏</button>
+            </div>
+            <div class="favorites-list" id="favoritesList">
+                </div>
+        </div>
+    </div>
+
     <div class="sidebar">
         <div class="sidebar-header">
-            <h3>📁 本地知识库</h3>
+            <h3>📁 当前知识库</h3>
             <div class="search-container">
                 <input type="text" id="searchBar" class="search-input" placeholder="🔍 搜索文件名...">
             </div>
-            <button class="btn-primary" id="newFileRootBtn">+ 新建根目录文件</button>
+            <button class="btn-primary" id="newFileRootBtn" style="width: 100%; padding: 8px; margin-bottom: 8px;">+ 新建根目录文档</button>
             <div class="button-group">
-                <button class="btn-secondary" id="newFolderRootBtn">📁 新建文件夹</button>
-                <button class="btn-secondary" id="refreshBtn">🔄 刷新</button>
+                <button class="btn-secondary" id="newFolderRootBtn">📁 新建目录</button>
+                <button class="btn-secondary" id="refreshBtn">🔄 刷新刷新</button>
             </div>
+            <button class="btn-secondary" id="switchLibraryBtn" style="width: 100%; margin-top: 8px; border-color: #4fc3f7; color: #4fc3f7;">🏠 切换知识库</button>
         </div>
-        <div class="file-tree" id="fileTree">
-            <div class="loading" style="padding:20px; color:var(--text-light)">加载中...</div>
-        </div>
+        <div class="file-tree" id="fileTree"></div>
     </div>
     
     <div class="main">
         <div class="editor-header">
-            <span class="current-file" id="currentFileName">请选择文件开始编写</span>
-            <div class="header-buttons">
-                <button class="tool-btn" id="sourceCodeBtn">📄 源码视图</button>
-            </div>
+            <span class="current-file" id="currentFileName">请从左侧选择文档</span>
+            <button class="tool-btn" id="sourceCodeBtn">📄 源码视图</button>
         </div>
         <div class="editor-container" id="editor-container"></div>
     </div>
@@ -322,243 +170,95 @@
         let currentFilePath = null;
         let vditor = null;
         let expandedFolders = new Set();
-        let isSourceMode = false; // 严谨的状态控制开关
+        let isSourceMode = false;
         
         const API_BASE = '/api';
-        const EDITABLE_EXTS = ['.md', '.markdown', '.txt', '.mdx', '.json', '.js', '.css', '.html', '.py'];
-        
-        // ========== API 请求部分 ==========
-        async function fetchTree() {
-            const r = await fetch(`${API_BASE}/tree`);
-            const d = await r.json();
-            return d.tree;
-        }
-        async function fetchFileContent(path) {
-            const r = await fetch(`${API_BASE}/file?path=${encodeURIComponent(path)}`);
-            const d = await r.json();
-            return d.content;
-        }
-        async function saveFile(path, content) {
-            await fetch(`${API_BASE}/file?path=${encodeURIComponent(path)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content })
-            });
-        }
-        async function deleteItem(path) { await fetch(`${API_BASE}/item?path=${encodeURIComponent(path)}`, { method: 'DELETE' }); }
-        async function renameItem(path, newName) {
-            const r = await fetch(`${API_BASE}/rename?path=${encodeURIComponent(path)}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ newName })
-            });
-            return await r.json();
-        }
-        async function createFolder(path) { await fetch(`${API_BASE}/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }); }
 
-        // ========== 核心：重构并修复源代码按钮 ==========
-        function toggleSourceMode() {
-            if (!vditor || !currentFilePath) return;
-            const btn = document.getElementById('sourceCodeBtn');
-            
-            // 1. 切换状态标记
-            isSourceMode = !isSourceMode;
-            if (isSourceMode) {
-                btn.textContent = '✨ 实时渲染';
-                btn.classList.add('active');
-            } else {
-                btn.textContent = '📄 源码视图';
-                btn.classList.remove('active');
-            }
-            
-            // 2. 备份当前文本，销毁旧实例，并彻底清空容器
-            const currentContent = vditor.getValue();
-            try { vditor.destroy(); } catch(e) {}
-            document.getElementById('editor-container').innerHTML = '';
-            
-            // 3. 用新模式重新初始化编辑器
-            initEditor(currentContent);
-        }
-
-        // ========== 渲染树形结构（融入实时搜索过滤） ==========
-        function renderTree(nodes, container, parentPath = '', searchKeyword = '') {
-            if (!nodes) return false;
-            let hasVisibleNode = false;
-
-            for (const node of nodes) {
-                const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
-                const isMatch = node.name.toLowerCase().includes(searchKeyword.toLowerCase());
-                
-                let childContainer = null;
-                let childMatched = false;
-
-                if (node.type === 'folder' && node.children) {
-                    childContainer = document.createElement('div');
-                    childContainer.className = 'tree-node-children';
-                    // 递归检查子节点
-                    childMatched = renderTree(node.children, childContainer, fullPath, searchKeyword);
-                }
-
-                // 如果当前节点匹配，或者子节点有匹配项，或者搜索框为空，则渲染该节点
-                if (isMatch || childMatched || !searchKeyword) {
-                    hasVisibleNode = true;
-                    const nodeDiv = document.createElement('div');
-                    nodeDiv.className = 'tree-node';
-
-                    const contentDiv = document.createElement('div');
-                    contentDiv.className = 'tree-node-content';
-                    if (currentFilePath === fullPath) contentDiv.classList.add('active');
-
-                    const labelDiv = document.createElement('div');
-                    labelDiv.className = 'tree-node-label';
-
-                    const iconSpan = document.createElement('span');
-                    iconSpan.className = 'icon';
-                    if (node.type === 'folder') {
-                        // 搜索时默认强制展开所有相符的夹
-                        const isOpen = searchKeyword ? true : expandedFolders.has(fullPath);
-                        iconSpan.textContent = isOpen ? '📂' : '📁';
-                    } else {
-                        iconSpan.textContent = node.name.endsWith('.md') ? '📝' : '📄';
-                    }
-
-                    const nameSpan = document.createElement('span');
-                    nameSpan.className = 'name';
-                    nameSpan.textContent = node.name;
-
-                    labelDiv.appendChild(iconSpan);
-                    labelDiv.appendChild(nameSpan);
-
-                    // 快捷操作按钮
-                    const actionsDiv = document.createElement('div');
-                    actionsDiv.className = 'file-actions';
-                    
-                    if (node.type === 'folder') {
-                        const addF = document.createElement('button'); addF.className='action-btn'; addF.textContent='+';
-                        addF.onclick=(e)=>{ e.stopPropagation(); createNewFile(fullPath); };
-                        actionsDiv.appendChild(addF);
-                    }
-                    const ren = document.createElement('button'); ren.className='action-btn'; ren.textContent='✏️';
-                    ren.onclick=(e)=>{ e.stopPropagation(); renameNode(fullPath, node.name); };
-                    const del = document.createElement('button'); del.className='action-btn delete'; del.textContent='🗑';
-                    del.onclick=(e)=>{ e.stopPropagation(); deleteNode(fullPath, node.type); };
-                    
-                    actionsDiv.appendChild(ren);
-                    actionsDiv.appendChild(del);
-                    contentDiv.appendChild(labelDiv);
-                    contentDiv.appendChild(actionsDiv);
-
-                    contentDiv.onclick = () => {
-                        if (node.type === 'folder') {
-                            if (expandedFolders.has(fullPath)) expandedFolders.delete(fullPath);
-                            else expandedFolders.add(fullPath);
-                            renderFullTree();
-                        } else {
-                            openFile(fullPath);
-                        }
-                    };
-
-                    nodeDiv.appendChild(contentDiv);
-                    if (node.type === 'folder' && (expandedFolders.has(fullPath) || searchKeyword) && childContainer) {
-                        nodeDiv.appendChild(childContainer);
-                    }
-                    container.appendChild(nodeDiv);
-                }
-            }
-            return hasVisibleNode;
-        }
-
-        async function renderFullTree() {
+        // ========== 初始化与配置拉取 ==========
+        async function initApp() {
             try {
-                if (!rawTreeData) rawTreeData = await fetchTree();
-                const container = document.getElementById('fileTree');
-                container.innerHTML = '';
-                const keyword = document.getElementById('searchBar').value;
-                renderTree(rawTreeData, container, '', keyword);
-            } catch (err) {
-                document.getElementById('fileTree').innerHTML = '<div style="padding:16px;color:#f85149;">加载服务连接失败</div>';
-            }
-        }
-
-        // ========== 打开与保存文件 ==========
-        async function openFile(filePath) {
-            try {
-                const content = await fetchFileContent(filePath);
-                currentFilePath = filePath;
-                document.getElementById('currentFileName').textContent = filePath;
+                const res = await fetch(`${API_BASE}/config`);
+                const config = await res.json();
+                renderFavorites(config.favorites);
                 
-                if (vditor) {
-                    vditor.setValue(content);
-                    // ⚠️ 这里彻底移除了原来导致报错的 vditor.setMode()
+                if (config.currentRoot) {
+                    document.getElementById('rootPathInput').value = config.currentRoot;
+                    enterWorkspace();
                 } else {
-                    initEditor(content);
+                    showHomeScreen();
                 }
-                await renderFullTree();
-            } catch (err) {
-                alert('读取文件失败: ' + err.message);
+            } catch (e) {
+                console.error("无法连接到本地服务器", e);
             }
         }
 
-        // ========== 初始化大纲和拖拽图片上传的编辑器 ==========
-        function initEditor(initialValue = '') {
-            vditor = new Vditor('editor-container', {
-                mode: isSourceMode ? 'sv' : 'ir', // 动态读取当前应该是源码还是渲染模式
-                height: '100%',
-                theme: 'dark',
-                outline: {
-                    enable: true,
-                    position: 'right'
-                },
-                toolbar: [
-                    'headings', 'bold', 'italic', 'strike', '|',
-                    'list', 'ordered-list', 'check', '|',
-                    'link', 'table', 'quote', 'code', 'inline-code', '|',
-                    'undo', 'redo'
-                ],
-                after: () => {
-                    // 编辑器初始化完成后，如果带有初始值（切换模式/新加载文件），则自动填入
-                    if (initialValue) {
-                        vditor.setValue(initialValue);
-                    }
-                },
-                input: async (val) => {
-                    if (currentFilePath) {
-                        await saveFile(currentFilePath, val);
-                    }
-                },
-                upload: {
-                    handler: async (files) => {
-                        const file = files[0];
-                        if (!file.type.startsWith('image/')) {
-                            alert('只支持上传图片格式文件');
-                            return null;
-                        }
-                        const reader = new FileReader();
-                        reader.onload = async (e) => {
-                            try {
-                                const res = await fetch('/api/upload', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ filename: file.name, base64Data: e.target.result })
-                                });
-                                const data = await res.json();
-                                if (data.success) {
-                                    vditor.insertValue(`![${file.name}](${data.url})`);
-                                } else {
-                                    alert('图片处理失败: ' + data.error);
-                                }
-                            } catch (err) {
-                                alert('图片上传服务器失败: ' + err.message);
-                            }
-                        };
-                        reader.readAsDataURL(file);
-                        return null;
-                    }
-                }
+        // ========== 主页与工作区切换逻辑 ==========
+        function showHomeScreen() { document.getElementById('homeScreen').classList.remove('hidden'); }
+        async function enterWorkspace() {
+            document.getElementById('homeScreen').classList.add('hidden');
+            document.getElementById('currentFileName').textContent = '请选择文件开始编写';
+            currentFilePath = null;
+            if (vditor) { vditor.destroy(); document.getElementById('editor-container').innerHTML = ''; vditor = null; }
+            await renderFullTree();
+        }
+
+        document.getElementById('openRootBtn').onclick = async () => {
+            const path = document.getElementById('rootPathInput').value.trim();
+            if (!path) return;
+            const res = await fetch(`${API_BASE}/config/root`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetPath: path })
+            });
+            const data = await res.json();
+            if (data.success) enterWorkspace();
+            else alert(data.error);
+        };
+
+        // 在输入框回车也能打开
+        document.getElementById('rootPathInput').onkeydown = (e) => {
+            if (e.key === 'Enter') document.getElementById('openRootBtn').click();
+        };
+
+        document.getElementById('favRootBtn').onclick = async () => {
+            const path = document.getElementById('rootPathInput').value.trim();
+            if (!path) return alert('请先输入路径');
+            updateFavorite(path, 'add');
+        };
+
+        document.getElementById('switchLibraryBtn').onclick = showHomeScreen;
+
+        async function updateFavorite(path, action) {
+            const res = await fetch(`${API_BASE}/config/favorite`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ favPath: path, action })
+            });
+            const data = await res.json();
+            if (data.success) renderFavorites(data.favorites);
+        }
+
+        function renderFavorites(favs) {
+            const container = document.getElementById('favoritesList');
+            if (favs.length === 0) {
+                container.innerHTML = '<div style="color:var(--text-light); text-align:center; margin-top:20px; font-size:13px;">暂无收藏路径，输入绝对路径后点击上方收藏按钮即可添加。</div>';
+                return;
+            }
+            container.innerHTML = '<h4>⭐ 收藏的知识库</h4>';
+            favs.forEach(fav => {
+                const item = document.createElement('div'); item.className = 'fav-item';
+                
+                const txt = document.createElement('span'); txt.className = 'fav-path'; txt.textContent = fav;
+                txt.onclick = () => { document.getElementById('rootPathInput').value = fav; document.getElementById('openRootBtn').click(); };
+                
+                const btn = document.createElement('button'); btn.className = 'fav-remove'; btn.textContent = '❌';
+                btn.onclick = (e) => { e.stopPropagation(); updateFavorite(fav, 'remove'); };
+                
+                item.appendChild(txt); item.appendChild(btn);
+                container.appendChild(item);
             });
         }
 
-        // ========== 其余辅助操作弹窗 ==========
+
+        // ========== 核心操作：弹窗控制 (已修复回车确定) ==========
         function showDialog(title, val, cb) {
             const overlay = document.createElement('div');
             overlay.className = 'dialog-overlay';
@@ -567,63 +267,193 @@
                     <h4>${title}</h4>
                     <input type="text" id="dIn" value="${val}">
                     <div class="dialog-buttons">
-                        <button class="cancel">取消</button>
-                        <button class="confirm">确定</button>
+                        <button class="cancel btn-secondary">取消</button>
+                        <button class="confirm btn-primary">确定</button>
                     </div>
                 </div>`;
             document.body.appendChild(overlay);
             const input = overlay.querySelector('#dIn');
             input.focus(); input.select();
+            
+            // ✨ 核心修复：监听回车键直接确认
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault(); // 阻止默认行为（防止多重触发）
+                    overlay.querySelector('.confirm').click();
+                } else if (e.key === 'Escape') {
+                    overlay.remove();
+                }
+            };
+
             overlay.querySelector('.confirm').onclick = () => { const v=input.value.trim(); overlay.remove(); if(v) cb(v); };
             overlay.querySelector('.cancel').onclick = () => overlay.remove();
         }
 
+        // ========== API 请求 ==========
+        async function fetchTree() { const r = await fetch(`${API_BASE}/tree`); const d = await r.json(); return d.tree; }
+        async function fetchFileContent(path) { const r = await fetch(`${API_BASE}/file?path=${encodeURIComponent(path)}`); const d = await r.json(); return d.content; }
+        async function saveFile(path, content) { await fetch(`${API_BASE}/file?path=${encodeURIComponent(path)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) }); }
+        async function deleteItem(path) { await fetch(`${API_BASE}/item?path=${encodeURIComponent(path)}`, { method: 'DELETE' }); }
+        async function renameItem(path, newName) { const r = await fetch(`${API_BASE}/rename?path=${encodeURIComponent(path)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newName }) }); return await r.json(); }
+        async function createFolder(path) { await fetch(`${API_BASE}/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }); }
+
+        // ========== 文件树渲染与操作 ==========
+        function renderTree(nodes, container, parentPath = '', searchKeyword = '') {
+            if (!nodes) return false;
+            let hasVisibleNode = false;
+            for (const node of nodes) {
+                const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+                const isMatch = node.name.toLowerCase().includes(searchKeyword.toLowerCase());
+                let childContainer = null; let childMatched = false;
+                if (node.type === 'folder' && node.children) {
+                    childContainer = document.createElement('div'); childContainer.className = 'tree-node-children';
+                    childMatched = renderTree(node.children, childContainer, fullPath, searchKeyword);
+                }
+                if (isMatch || childMatched || !searchKeyword) {
+                    hasVisibleNode = true;
+                    const nodeDiv = document.createElement('div'); nodeDiv.className = 'tree-node';
+                    const contentDiv = document.createElement('div'); contentDiv.className = 'tree-node-content';
+                    if (currentFilePath === fullPath) contentDiv.classList.add('active');
+
+                    const labelDiv = document.createElement('div'); labelDiv.className = 'tree-node-label';
+                    const iconSpan = document.createElement('span'); iconSpan.className = 'icon';
+                    iconSpan.textContent = node.type === 'folder' ? ((searchKeyword || expandedFolders.has(fullPath)) ? '📂' : '📁') : (node.name.endsWith('.md') ? '📝' : '📄');
+                    const nameSpan = document.createElement('span'); nameSpan.className = 'name'; nameSpan.textContent = node.name;
+                    labelDiv.appendChild(iconSpan); labelDiv.appendChild(nameSpan);
+
+                    const actionsDiv = document.createElement('div'); actionsDiv.className = 'file-actions';
+                    if (node.type === 'folder') {
+                        const addF = document.createElement('button'); addF.className='action-btn'; addF.textContent='+';
+                        addF.onclick=(e)=>{ e.stopPropagation(); createNewFile(fullPath); }; actionsDiv.appendChild(addF);
+                    }
+                    const ren = document.createElement('button'); ren.className='action-btn'; ren.textContent='✏️';
+                    ren.onclick=(e)=>{ e.stopPropagation(); renameNode(fullPath, node.name); };
+                    const del = document.createElement('button'); del.className='action-btn delete'; del.textContent='🗑';
+                    del.onclick=(e)=>{ e.stopPropagation(); deleteNode(fullPath, node.type); };
+                    
+                    actionsDiv.appendChild(ren); actionsDiv.appendChild(del);
+                    contentDiv.appendChild(labelDiv); contentDiv.appendChild(actionsDiv);
+
+                    contentDiv.onclick = () => {
+                        if (node.type === 'folder') {
+                            if (expandedFolders.has(fullPath)) expandedFolders.delete(fullPath); else expandedFolders.add(fullPath);
+                            renderFullTree();
+                        } else { openFile(fullPath); }
+                    };
+
+                    nodeDiv.appendChild(contentDiv);
+                    if (node.type === 'folder' && (expandedFolders.has(fullPath) || searchKeyword) && childContainer) nodeDiv.appendChild(childContainer);
+                    container.appendChild(nodeDiv);
+                }
+            }
+            return hasVisibleNode;
+        }
+
+        async function renderFullTree() {
+            try {
+                rawTreeData = await fetchTree();
+                const container = document.getElementById('fileTree'); container.innerHTML = '';
+                const keyword = document.getElementById('searchBar').value;
+                renderTree(rawTreeData, container, '', keyword);
+            } catch (err) {
+                document.getElementById('fileTree').innerHTML = '<div style="padding:16px;color:#f85149;">加载目录失败</div>';
+            }
+        }
+
+        // ========== 编辑器逻辑 (无缝重建模式) ==========
+        function toggleSourceMode() {
+            if (!vditor || !currentFilePath) return;
+            const btn = document.getElementById('sourceCodeBtn');
+            isSourceMode = !isSourceMode;
+            if (isSourceMode) { btn.textContent = '✨ 实时渲染'; btn.classList.add('active'); }
+            else { btn.textContent = '📄 源码视图'; btn.classList.remove('active'); }
+            
+            const currentContent = vditor.getValue();
+            try { vditor.destroy(); } catch(e) {}
+            document.getElementById('editor-container').innerHTML = '';
+            initEditor(currentContent);
+        }
+
+        async function openFile(filePath) {
+            try {
+                const content = await fetchFileContent(filePath);
+                currentFilePath = filePath;
+                document.getElementById('currentFileName').textContent = filePath;
+                if (vditor) vditor.setValue(content); else initEditor(content);
+                await renderFullTree();
+            } catch (err) { alert('读取文件失败: ' + err.message); }
+        }
+
+        function initEditor(initialValue = '') {
+            vditor = new Vditor('editor-container', {
+                mode: isSourceMode ? 'sv' : 'ir',
+                height: '100%', theme: 'dark',
+                outline: { enable: true, position: 'right' },
+                toolbar: [ 'headings', 'bold', 'italic', 'strike', '|', 'list', 'ordered-list', 'check', '|', 'link', 'table', 'quote', 'code', 'inline-code', '|', 'undo', 'redo' ],
+                after: () => { if (initialValue) vditor.setValue(initialValue); },
+                input: async (val) => { if (currentFilePath) await saveFile(currentFilePath, val); },
+                upload: {
+                    handler: async (files) => {
+                        const file = files[0];
+                        if (!file.type.startsWith('image/')) return alert('只支持图片');
+                        const reader = new FileReader();
+                        reader.onload = async (e) => {
+                            try {
+                                const res = await fetch('/api/upload', {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ filename: file.name, base64Data: e.target.result })
+                                });
+                                const data = await res.json();
+                                if (data.success) vditor.insertValue(`![${file.name}](${data.url})`);
+                                else alert('图片失败: ' + data.error);
+                            } catch (err) { alert('上传错误: ' + err.message); }
+                        };
+                        reader.readAsDataURL(file);
+                        return null;
+                    }
+                }
+            });
+        }
+
+        // ========== DOM 事件绑定 ==========
         function createNewFile(parent = '') {
-            showDialog('新建文件', '未命名文档.md', async (name) => {
+            showDialog('新建文件', '未命名.md', async (name) => {
                 const p = parent ? `${parent}/${name}` : name;
                 await saveFile(p, '# ' + name.replace('.md',''));
-                rawTreeData = null; 
-                await renderFullTree();
-                await openFile(p);
+                await renderFullTree(); await openFile(p);
             });
         }
         function createNewFolder(parent = '') {
             showDialog('新建文件夹', '新建文件夹', async (name) => {
                 const p = parent ? `${parent}/${name}` : name;
-                await createFolder(p);
-                rawTreeData = null; await renderFullTree();
+                await createFolder(p); await renderFullTree();
             });
         }
         function renameNode(oldPath, oldName) {
             showDialog('重命名', oldName, async (newName) => {
                 const res = await renameItem(oldPath, newName);
-                if (currentFilePath === oldPath) {
-                    currentFilePath = res.newPath;
-                    document.getElementById('currentFileName').textContent = res.newPath;
-                }
-                rawTreeData = null; await renderFullTree();
+                if (currentFilePath === oldPath) { currentFilePath = res.newPath; document.getElementById('currentFileName').textContent = res.newPath; }
+                await renderFullTree();
             });
         }
         async function deleteNode(path, type) {
-            if (!confirm(`确定要删除此${type === 'folder' ? '文件夹及其全部内容' : '文件'}吗？`)) return;
+            if (!confirm(`确定删除此${type === 'folder' ? '文件夹及其全部内容' : '文件'}吗？`)) return;
             await deleteItem(path);
             if (currentFilePath === path) {
-                currentFilePath = null;
-                vditor.setValue('');
+                currentFilePath = null; vditor.setValue('');
                 document.getElementById('currentFileName').textContent = '请选择文件开始编写';
             }
-            rawTreeData = null; await renderFullTree();
+            await renderFullTree();
         }
 
-        // ========== 绑定全局初始化事件 ==========
-        document.getElementById('searchBar').oninput = () => renderFullTree();
+        document.getElementById('searchBar').oninput = renderFullTree;
         document.getElementById('newFileRootBtn').onclick = () => createNewFile('');
         document.getElementById('newFolderRootBtn').onclick = () => createNewFolder('');
-        document.getElementById('refreshBtn').onclick = () => { rawTreeData = null; renderFullTree(); };
+        document.getElementById('refreshBtn').onclick = renderFullTree;
         document.getElementById('sourceCodeBtn').onclick = toggleSourceMode;
 
-        initEditor();
-        renderFullTree();
+        // 启动应用
+        initApp();
     </script>
 </body>
 </html>

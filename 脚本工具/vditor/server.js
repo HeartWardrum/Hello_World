@@ -6,23 +6,88 @@ const cors = require('cors');
 const app = express();
 const PORT = 3000;
 
-// ⚠️ 改成你的实际目录（使用正斜杠）
-const NOTES_DIR = 'D:/文档/github/Hello_World';
+// ========== 动态配置管理 ==========
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+let config = { currentRoot: '', favorites: [] };
 
-// 确保目录存在
-if (!fs.existsSync(NOTES_DIR)) {
-    fs.mkdirSync(NOTES_DIR, { recursive: true });
+// 启动时加载配置
+if (fs.existsSync(CONFIG_FILE)) {
+    try {
+        config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch (e) {
+        console.error('读取配置文件失败，使用默认配置');
+    }
+}
+
+function saveConfig() {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // 提升限制以支持大图上传
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static('public'));
-// 将 assets 目录静态暴露，确保前端能正常预览图片
-app.use('/assets', express.static(path.join(NOTES_DIR, 'assets')));
+
+// ========== 动态资源路由 (替代原先静态挂载) ==========
+app.use('/assets', (req, res) => {
+    if (!config.currentRoot) return res.status(403).send('未配置根目录');
+    
+    // 从 req.path 直接获取去掉 /assets 后的剩余路径，天然支持中文和任意子目录
+    const assetPath = path.normalize(path.join(config.currentRoot, 'assets', decodeURIComponent(req.path)));
+    
+    // 防止跳出 assets 目录的安全校验
+    const relative = path.relative(path.join(config.currentRoot, 'assets'), assetPath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        return res.status(403).send('非法路径');
+    }
+    
+    if (fs.existsSync(assetPath)) {
+        res.sendFile(assetPath);
+    } else {
+        res.status(404).send('图片未找到');
+    }
+});
+
+// ========== API：配置与主页管理 ==========
+app.get('/api/config', (req, res) => {
+    res.json(config);
+});
+
+app.post('/api/config/root', (req, res) => {
+    const { targetPath } = req.body;
+    if (!targetPath) return res.status(400).json({ error: '路径不能为空' });
+    const normalizedPath = path.normalize(targetPath).replace(/\\/g, '/');
+    
+    if (!fs.existsSync(normalizedPath)) {
+        try {
+            fs.mkdirSync(normalizedPath, { recursive: true });
+        } catch (e) {
+            return res.status(400).json({ error: '路径不存在且无法创建' });
+        }
+    }
+    
+    config.currentRoot = normalizedPath;
+    saveConfig();
+    res.json({ success: true, root: config.currentRoot });
+});
+
+app.post('/api/config/favorite', (req, res) => {
+    const { favPath, action } = req.body;
+    const normalizedPath = path.normalize(favPath).replace(/\\/g, '/');
+    
+    if (action === 'add') {
+        if (!config.favorites.includes(normalizedPath)) config.favorites.push(normalizedPath);
+    } else if (action === 'remove') {
+        config.favorites = config.favorites.filter(p => p !== normalizedPath);
+    }
+    
+    saveConfig();
+    res.json({ success: true, favorites: config.favorites });
+});
+
 
 // ========== 安全路径函数 ==========
 function safePath(relativePath) {
-    if (!relativePath) return null;
+    if (!relativePath || !config.currentRoot) return null;
     try {
         let decoded = decodeURIComponent(relativePath);
         decoded = decoded.replace(/\\/g, '/');
@@ -33,15 +98,13 @@ function safePath(relativePath) {
             safeParts.push(part);
         }
         const cleaned = safeParts.join('/');
-        let fullPath = path.normalize(path.join(NOTES_DIR, cleaned));
-        const relative = path.relative(NOTES_DIR, fullPath);
+        let fullPath = path.normalize(path.join(config.currentRoot, cleaned));
+        const relative = path.relative(config.currentRoot, fullPath);
         if (relative.startsWith('..') || path.isAbsolute(relative)) {
-            console.warn(`非法路径: ${relativePath} -> ${fullPath}`);
             return null;
         }
         return fullPath;
     } catch (err) {
-        console.error(`路径解析错误: ${relativePath}`, err);
         return null;
     }
 }
@@ -52,23 +115,18 @@ function getDirectoryTree(dirPath, relativePath = '') {
     try {
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         for (const entry of entries) {
-            if (entry.name.startsWith('.') || entry.name === 'assets') continue; // 过滤隐藏文件夹和资源文件夹
+            if (entry.name.startsWith('.') || entry.name === 'assets') continue; 
             const fullPath = path.join(dirPath, entry.name);
             const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
             if (entry.isDirectory()) {
                 items.push({
-                    type: 'folder',
-                    name: entry.name,
-                    path: relPath,
+                    type: 'folder', name: entry.name, path: relPath,
                     children: getDirectoryTree(fullPath, relPath)
                 });
             } else {
                 const ext = path.extname(entry.name).toLowerCase();
                 items.push({
-                    type: 'file',
-                    name: entry.name,
-                    path: relPath,
-                    ext: ext,
+                    type: 'file', name: entry.name, path: relPath, ext: ext,
                     editable: ['.md', '.markdown', '.txt', '.mdx', '.json', '.js', '.css', '.html', '.py'].includes(ext)
                 });
             }
@@ -83,11 +141,12 @@ function getDirectoryTree(dirPath, relativePath = '') {
     return items;
 }
 
-// ========== API 路由 ==========
+// ========== 业务路由 ==========
 app.get('/api/tree', (req, res) => {
+    if (!config.currentRoot) return res.status(400).json({ error: '未设置根目录' });
     try {
-        const tree = getDirectoryTree(NOTES_DIR);
-        res.json({ tree, rootPath: NOTES_DIR });
+        const tree = getDirectoryTree(config.currentRoot);
+        res.json({ tree, rootPath: config.currentRoot });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -95,7 +154,6 @@ app.get('/api/tree', (req, res) => {
 
 app.get('/api/file', (req, res) => {
     const filePath = req.query.path;
-    if (!filePath) return res.status(400).json({ error: '缺少 path 参数' });
     const fullPath = safePath(filePath);
     if (!fullPath) return res.status(403).json({ error: '非法路径' });
     if (!fs.existsSync(fullPath)) return res.status(404).json({ error: '文件不存在' });
@@ -109,7 +167,6 @@ app.get('/api/file', (req, res) => {
 
 app.post('/api/file', (req, res) => {
     const filePath = req.query.path;
-    if (!filePath) return res.status(400).json({ error: '缺少 path 参数' });
     const fullPath = safePath(filePath);
     if (!fullPath) return res.status(403).json({ error: '非法路径' });
     const dir = path.dirname(fullPath);
@@ -122,25 +179,20 @@ app.post('/api/file', (req, res) => {
     }
 });
 
-// 新增：图片/附件 Base64 异步上传路由
 app.post('/api/upload', (req, res) => {
     try {
+        if (!config.currentRoot) return res.status(400).json({ error: '未配置根目录' });
         const { filename, base64Data } = req.body;
         if (!filename || !base64Data) return res.status(400).json({ error: '上传数据不完整' });
 
-        const assetsDir = path.join(NOTES_DIR, 'assets');
-        if (!fs.existsSync(assetsDir)) {
-            fs.mkdirSync(assetsDir, { recursive: true });
-        }
+        const assetsDir = path.join(config.currentRoot, 'assets');
+        if (!fs.existsSync(assetsDir)) fs.mkdirSync(assetsDir, { recursive: true });
 
-        // 清理 base64 头部声明
         const pureBase64 = base64Data.replace(/^data:image\/\w+;base64,/, "");
         const safeFileName = `${Date.now()}_${filename.replace(/\s+/g, '_')}`;
         const destPath = path.join(assetsDir, safeFileName);
 
         fs.writeFileSync(destPath, pureBase64, 'base64');
-        
-        // 返回相对路径供 Markdown 引用
         res.json({ success: true, url: `assets/${safeFileName}` });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -148,9 +200,7 @@ app.post('/api/upload', (req, res) => {
 });
 
 app.delete('/api/item', (req, res) => {
-    const itemPath = req.query.path;
-    if (!itemPath) return res.status(400).json({ error: '缺少 path 参数' });
-    const fullPath = safePath(itemPath);
+    const fullPath = safePath(req.query.path);
     if (!fullPath) return res.status(403).json({ error: '非法路径' });
     try {
         const stat = fs.statSync(fullPath);
@@ -165,7 +215,6 @@ app.delete('/api/item', (req, res) => {
 app.put('/api/rename', (req, res) => {
     const oldPath = req.query.path;
     const { newName } = req.body;
-    if (!oldPath || !newName) return res.status(400).json({ error: '缺少参数' });
     const oldFullPath = safePath(oldPath);
     if (!oldFullPath) return res.status(403).json({ error: '非法路径' });
     const newFullPath = path.join(path.dirname(oldFullPath), newName);
@@ -180,13 +229,11 @@ app.put('/api/rename', (req, res) => {
 });
 
 app.post('/api/folder', (req, res) => {
-    const folderPath = req.query.path;
-    if (!folderPath) return res.status(400).json({ error: '缺少 path 参数' });
-    const fullPath = safePath(folderPath);
+    const fullPath = safePath(req.query.path);
     if (!fullPath) return res.status(403).json({ error: '非法路径' });
     try {
         fs.mkdirSync(fullPath, { recursive: true });
-        res.json({ success: true, path: folderPath });
+        res.json({ success: true, path: req.query.path });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -194,5 +241,4 @@ app.post('/api/folder', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
-    console.log(`Root directory: ${NOTES_DIR}`);
 });
