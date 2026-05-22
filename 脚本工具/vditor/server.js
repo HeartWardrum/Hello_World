@@ -152,11 +152,37 @@ app.get('/api/tree', (req, res) => {
     }
 });
 
+// 返回文件元信息（大小等），不读取内容，供前端决策走普通还是流式加载
+app.get('/api/file/meta', (req, res) => {
+    const filePath = req.query.path;
+    const fullPath = safePath(filePath);
+    if (!fullPath) return res.status(403).json({ error: '非法路径' });
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ error: '文件不存在' });
+    try {
+        const stat = fs.statSync(fullPath);
+        res.json({ size: stat.size, path: filePath });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/file', (req, res) => {
     const filePath = req.query.path;
     const fullPath = safePath(filePath);
     if (!fullPath) return res.status(403).json({ error: '非法路径' });
     if (!fs.existsSync(fullPath)) return res.status(404).json({ error: '文件不存在' });
+
+    // stream=1 时走流式传输，Transfer-Encoding: chunked，前端可边收边渲染
+    if (req.query.stream === '1') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('X-File-Path', encodeURIComponent(filePath));
+        const stream = fs.createReadStream(fullPath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+        stream.on('error', err => { if (!res.headersSent) res.status(500).end(); });
+        stream.pipe(res);
+        return;
+    }
+
     try {
         const content = fs.readFileSync(fullPath, 'utf-8');
         res.json({ content, path: filePath });
