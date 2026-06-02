@@ -1,22 +1,22 @@
 SELECT DISTINCT
-    t.risk_change_type,
-    REPLACE(
-        REGEXP_SUBSTR(t.remark,'[^,]+',1,lv.lvl),
-        '',
-        ''
-    ) AS remark
+t.risk_change_type,
+REPLACE(
+REGEXP_SUBSTR(t.remark,'[^,]+',1,lv.lvl),
+'',
+''
+) AS remark
 FROM
-(
-    SELECT
-        item_code AS risk_change_type,
-        remark
-    FROM table1
-    WHERE item_name=''
+( 收拾收拾但是都是当时的
+SELECT
+item_code AS risk_change_type,
+remark
+FROM table1
+WHERE item_name=''
 ) t
 JOIN
 (
-    SELECT LEVEL AS lvl
-    FROM dual
-    CONNECT BY LEVEL <= 100
+SELECT LEVEL AS lvl
+FROM dual
+CONNECT BY LEVEL <= 100
 ) lv
 ON lv.lvl <= REGEXP_COUNT(t.remark, ',') + 1;
