@@ -1,16 +1,18 @@
-def check_equal_totally_ignore_order(df1, df2):
-    # 1. 如果行列数量都不等，直接返回 False
+def compare_values_only(df1, df2):
+    # 如果行数或列数本身就不等，那肯定不完全一样
     if df1.shape != df2.shape:
         return False
+        
+    # 1. 先对齐列名顺序（横向对齐）
+    d1 = df1.reindex(columns=sorted(df1.columns))
+    d2 = df2.reindex(columns=sorted(df2.columns))
     
-    # 2. 将两者的列名按字母顺序横向排序（对齐列序）
-    df1_aligned = df1.reindex(columns=sorted(df1.columns))
-    df2_aligned = df2.reindex(columns=sorted(df2.columns))
+    # 2. 按照所有列的内容进行排序，把相同的行挪到相同的位置（纵向对齐）
+    d1 = d1.sort_values(by=list(d1.columns)).reset_index(drop=True)
+    d2 = d2.sort_values(by=list(d2.columns)).reset_index(drop=True)
     
-    # 3. 把所有的列都当作排序键，进行纵向排序（对齐行序）
-    # sort_values(by=list(...)) 会从第一列开始比，一样就比第二列，以此类推
-    df1_sorted = df1_aligned.sort_values(by=list(df1_aligned.columns)).reset_index(drop=True)
-    df2_sorted = df2_aligned.sort_values(by=list(df2_aligned.columns)).reset_index(drop=True)
-    
-    # 4. 此时两者的行列顺序已完全一致，直接对比内容
-    return df1_sorted.equals(df2_sorted)
+    # 3. 此时索引相同、顺序相同，直接对比
+    return d1.equals(d2)
+
+# 使用示例
+# print(compare_values_only(df1, df2))
