@@ -1,18 +1,12 @@
-def compare_values_only(df1, df2):
-    # 如果行数或列数本身就不等，那肯定不完全一样
-    if df1.shape != df2.shape:
-        return False
-        
-    # 1. 先对齐列名顺序（横向对齐）
-    d1 = df1.reindex(columns=sorted(df1.columns))
-    d2 = df2.reindex(columns=sorted(df2.columns))
-    
-    # 2. 按照所有列的内容进行排序，把相同的行挪到相同的位置（纵向对齐）
-    d1 = d1.sort_values(by=list(d1.columns)).reset_index(drop=True)
-    d2 = d2.sort_values(by=list(d2.columns)).reset_index(drop=True)
-    
-    # 3. 此时索引相同、顺序相同，直接对比
-    return d1.equals(d2)
+# 降维打击：全部转成字符串、去空格、排序
+def force_compare(df1, df2):
+    def clean_df(df):
+        # 转成字符串 -> 去除两端空格 -> 排序列 -> 重置索引
+        d = df.astype(str).apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+        d = d.reindex(columns=sorted(d.columns))
+        return d.sort_values(by=list(d.columns)).reset_index(drop=True)
 
-# 使用示例
-# print(compare_values_only(df1, df2))
+    return clean_df(df1).equals(clean_df(df2))
+
+# 试一下这个，看看是不是变 True 了？
+print(force_compare(df1, df2))
