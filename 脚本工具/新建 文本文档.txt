@@ -1,92 +1,16 @@
-import pandas as pd
-import numpy as np
-
-def compare_dataframes_universal(df1, df2, key_column=None):
-    """
-    通用 DataFrame 对比函数
+def check_equal_totally_ignore_order(df1, df2):
+    # 1. 如果行列数量都不等，直接返回 False
+    if df1.shape != df2.shape:
+        return False
     
-    参数:
-    df1, df2: 需要对比的两个 DataFrame
-    key_column: 用于对齐行记录的唯一主键列名（如 'ID', 'UUID' 等）。
-                如果为 None，则默认强制按数据的位置（行号）进行从上到下的对比。
-    """
-    print("="*20 + " 开始数据对比 " + "="*20)
+    # 2. 将两者的列名按字母顺序横向排序（对齐列序）
+    df1_aligned = df1.reindex(columns=sorted(df1.columns))
+    df2_aligned = df2.reindex(columns=sorted(df2.columns))
     
-    # 复制一份，避免修改原数据
-    d1 = df1.copy()
-    d2 = df2.copy()
+    # 3. 把所有的列都当作排序键，进行纵向排序（对齐行序）
+    # sort_values(by=list(...)) 会从第一列开始比，一样就比第二列，以此类推
+    df1_sorted = df1_aligned.sort_values(by=list(df1_aligned.columns)).reset_index(drop=True)
+    df2_sorted = df2_aligned.sort_values(by=list(df2_aligned.columns)).reset_index(drop=True)
     
-    # ---- 1. 检查并对齐列名 ----
-    cols1 = set(d1.columns)
-    cols2 = set(d2.columns)
-    
-    only_in_d1_cols = cols1 - cols2
-    only_in_d2_cols = cols2 - cols1
-    common_cols = list(cols1 & cols2)
-    
-    if only_in_d1_cols:
-        print(f"⚠️ [列差异] 仅在第一个 DF 中存在的列: {only_in_d1_cols}")
-    if only_in_d2_cols:
-        print(f"⚠️ [列差异] 仅在第二个 DF 中存在的列: {only_in_d2_cols}")
-        
-    if not common_cols:
-        print("❌ [错误] 两个 DataFrame 没有公共列，无法对比内容！")
-        return
-        
-    # 只保留公共列进行深度对比（如果是指定了主键，主键必须在公共列中）
-    if key_column and key_column not in common_cols:
-        print(f"❌ [错误] 指定的主键列 '{key_column}' 不在公共列中！")
-        return
-        
-    # ---- 2. 行对齐处理 ----
-    if key_column:
-        print(f"ℹ️ 正在基于主键列 [{key_column}] 对齐行数据...")
-        # 找出主键的交集、差集
-        keys1 = set(d1[key_column])
-        keys2 = set(d2[key_column])
-        
-        only_in_d1_keys = keys1 - keys2
-        only_in_d2_keys = keys2 - keys1
-        
-        if only_in_d1_keys:
-            print(f"⚠️ [行差异] 仅在第一个 DF 中存在的行(主键): {list(only_in_d1_keys)[:10]}... (共{len(only_in_d1_keys)}行)")
-        if only_in_d2_keys:
-            print(f"⚠️ [行差异] 仅在第二个 DF 中存在的行(主键): {list(only_in_d2_keys)[:10]}... (共{len(only_in_d2_keys)}行)")
-            
-        # 过滤出共有主键的行，并按主键排序，确保顺序一致
-        d1_match = d1[d1[key_column].isin(keys2)].sort_values(by=key_column).reset_index(drop=True)
-        d2_match = d2[d2[key_column].isin(keys1)].sort_values(by=key_column).reset_index(drop=True)
-    else:
-        print("ℹ️ 未指定主键，将强制重置索引按位置行号进行对比...")
-        d1_match = d1.reset_index(drop=True)
-        d2_match = d2.reset_index(drop=True)
-        
-        # 如果行数不一致，截取对齐
-        if len(d1_match) != len(d2_match):
-            print(f"⚠️ [行数不一致] DF1 有 {len(d1_match)} 行, DF2 有 {len(d2_match)} 行。将只对比前 {min(len(d1_match), len(d2_match))} 行。")
-            min_rows = min(len(d1_match), len(d2_match))
-            d1_match = d1_match.iloc[:min_rows]
-            d2_match = d2_match.iloc[:min_rows]
-
-    # ---- 3. 字段值差异深度对比 ----
-    # 确保列的排列顺序完全一致
-    d1_compare = d1_match[common_cols].reindex(columns=sorted(common_cols))
-    d2_compare = d2_match[common_cols].reindex(columns=sorted(common_cols))
-    
-    # 恢复主键作为索引，方便 compare() 结果的可读性
-    if key_column:
-        d1_compare.index = d1_match[key_column]
-        d2_compare.index = d2_match[key_column]
-        
-    try:
-        # 使用 pandas 自带的 compare
-        val_diff = d1_compare.compare(d2_compare)
-        if val_diff.empty:
-            print("✅ [值对比] 共有行列的字段值完全一致！")
-            return None
-        else:
-            print("🚨 [值对比] 发现字段值存在以下差异：")
-            return val_diff
-    except Exception as e:
-        print(f"❌ [对比失败] 发生未知错误，可能是由于数据类型（dtype）极度不兼容导致: {e}")
-        return None
+    # 4. 此时两者的行列顺序已完全一致，直接对比内容
+    return df1_sorted.equals(df2_sorted)
