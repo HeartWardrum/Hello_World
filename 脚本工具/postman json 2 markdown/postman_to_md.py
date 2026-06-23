@@ -17,11 +17,10 @@ def get_desktop_path():
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
 def has_selected_api(node):
-    """🚀 核心修复逻辑：递归检查某个节点（或文件夹内部）是否包含至少一个被勾选的接口"""
+    """递归检查某个节点（或文件夹内部）是否包含至少一个被勾选的接口"""
     if node["type"] == "api":
         return node["var"].get()
     elif node["type"] == "folder":
-        # 只要子项里有一个返回 True，该文件夹就判定为“有被选中的接口”
         return any(has_selected_api(child) for child in node["children"])
     return False
 
@@ -35,10 +34,8 @@ def generate_markdown_with_tree(structure, output_filename, collection_name):
     markdown_content = [f"# {collection_name}\n", "--- \n"]
 
     def write_node(node, level=2):
-        """递归写入节点（支持无限层级文件夹）"""
-        # 如果是文件夹
+        """递归写入节点"""
         if node["type"] == "folder":
-            # 🚀 核心修复：如果这个文件夹里面没有任何一个接口被勾选，直接默默跳过，不写入标题
             if not has_selected_api(node):
                 return
                 
@@ -47,7 +44,6 @@ def generate_markdown_with_tree(structure, output_filename, collection_name):
             for child in node["children"]:
                 write_node(child, level + 1)
         
-        # 如果是接口且被勾选了
         elif node["type"] == "api" and node["var"].get():
             item = node["data"]
             name = item.get("name", "未命名接口")
@@ -141,7 +137,7 @@ class PostmanConverterApp:
         self.btn_parse = tk.Button(root, text="🔍 点击解析并分层渲染接口", font=self.font_style, bg="#2f54eb", fg="white", command=self.parse_json_file)
         self.btn_parse.pack(fill="x", padx=20, pady=10)
 
-        # 2. 接口列表顶部控制区
+        # 2. 接口列表控制区
         list_header_frame = tk.Frame(root)
         list_header_frame.pack(fill="x", padx=20, pady=(5, 2))
         
@@ -169,6 +165,9 @@ class PostmanConverterApp:
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
 
+        # 🚀 核心修复：绑定鼠标滚轮滚动事件到 Canvas 区域
+        self.canvas.bind_all("<MouseWheel>", self.on_mouse_wheel)
+
         # 3. 输出文件名及转换按钮区域
         tk.Label(root, text="第三步：输出 Markdown 文件名:", font=self.font_style).pack(anchor="w", padx=20, pady=(10, 2))
         self.name_entry = tk.Entry(root, font=self.font_style)
@@ -177,6 +176,12 @@ class PostmanConverterApp:
         
         self.btn_convert = tk.Button(root, text="🚀 转化选中的接口并保存至桌面", font=("Microsoft YaHei", 11, "bold"), bg="#107c41", fg="white", command=self.start_conversion)
         self.btn_convert.pack(fill="x", padx=20, pady=(15, 15), ipady=5)
+
+    def on_mouse_wheel(self, event):
+        """🚀 鼠标滚轮事件处理：根据滚轮方向滚动画布"""
+        # Windows 系统中，event.delta 通常是 120 的倍数（向上滚动为正，向下为负）
+        # 将其除以 -120 可以得到平滑的滚动单位
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def browse_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")])
