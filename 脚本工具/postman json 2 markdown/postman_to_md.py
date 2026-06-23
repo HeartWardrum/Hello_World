@@ -16,6 +16,15 @@ def get_desktop_path():
     """获取当前系统桌面的绝对路径"""
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
+def has_selected_api(node):
+    """🚀 核心修复逻辑：递归检查某个节点（或文件夹内部）是否包含至少一个被勾选的接口"""
+    if node["type"] == "api":
+        return node["var"].get()
+    elif node["type"] == "folder":
+        # 只要子项里有一个返回 True，该文件夹就判定为“有被选中的接口”
+        return any(has_selected_api(child) for child in node["children"])
+    return False
+
 def generate_markdown_with_tree(structure, output_filename, collection_name):
     """根据带层级的结构生成支持文件夹分层的 Markdown"""
     desktop_dir = get_desktop_path()
@@ -29,7 +38,10 @@ def generate_markdown_with_tree(structure, output_filename, collection_name):
         """递归写入节点（支持无限层级文件夹）"""
         # 如果是文件夹
         if node["type"] == "folder":
-            # 根据层级选择标题级数，如 ## 文件夹名，### 子文件夹名
+            # 🚀 核心修复：如果这个文件夹里面没有任何一个接口被勾选，直接默默跳过，不写入标题
+            if not has_selected_api(node):
+                return
+                
             hashes = "#" * level
             markdown_content.append(f"{hashes} 📁 {node['name']}\n")
             for child in node["children"]:
@@ -42,7 +54,6 @@ def generate_markdown_with_tree(structure, output_filename, collection_name):
             request = item.get("request", {})
             method = request.get("method", "GET")
             
-            # 🚀 新增功能：读取接口本身的 description 备注
             desc = request.get("description", item.get("description", ""))
             if isinstance(desc, dict):
                 desc = desc.get("content", "")
@@ -109,9 +120,9 @@ class PostmanConverterApp:
         self.root.geometry("620x560")
         
         self.font_style = ("Microsoft YaHei", 10)
-        self.tree_structure = []     # 存放带层级的节点树
+        self.tree_structure = []     
         self.collection_name = "API Documentation"
-        self.is_bulk_updating = False # 防止联动死循环
+        self.is_bulk_updating = False 
 
         # 1. JSON文件路径区域
         tk.Label(root, text="第一步：拖入或选择 Postman JSON 文件:", font=self.font_style).pack(anchor="w", padx=20, pady=(15, 2))
@@ -121,14 +132,12 @@ class PostmanConverterApp:
         self.file_entry = tk.Entry(file_frame, font=self.font_style)
         self.file_entry.pack(side="left", fill="x", expand=True, ipady=3)
         
-        # 注册原生拖拽
         self.file_entry.drop_target_register(DND_FILES)
         self.file_entry.dnd_bind('<<Drop>>', self.handle_drop)
         
         btn_browse = tk.Button(file_frame, text=" 浏览... ", font=self.font_style, command=self.browse_file)
         btn_browse.pack(side="right", padx=(10, 0))
         
-        # 解析按钮
         self.btn_parse = tk.Button(root, text="🔍 点击解析并分层渲染接口", font=self.font_style, bg="#2f54eb", fg="white", command=self.parse_json_file)
         self.btn_parse.pack(fill="x", padx=20, pady=10)
 
@@ -139,12 +148,10 @@ class PostmanConverterApp:
         self.list_label = tk.Label(list_header_frame, text="第二步：请选择接口 (支持按文件夹全选):", font=self.font_style)
         self.list_label.pack(side="left")
         
-        # 全局总控制框
         self.global_var = tk.BooleanVar(value=True)
         self.cb_global = tk.Checkbutton(list_header_frame, text="全局全选/全不选", variable=self.global_var, font=("Microsoft YaHei", 9, "bold"), fg="#2f54eb", command=self.toggle_global_all)
         self.cb_global.pack(side="right")
         
-        # 接口列表展示区域（带滚动条）
         self.canvas_frame = tk.Frame(root, bd=1, relief="sunken")
         self.canvas_frame.pack(fill="both", expand=True, padx=20, pady=5)
         
@@ -188,27 +195,25 @@ class PostmanConverterApp:
         self.parse_json_file()
 
     def build_tree(self, item_list):
-        """递归建立 UI 树状节点结构数据"""
         nodes = []
         for item in item_list:
-            if "request" in item: # 说明是接口
+            if "request" in item: 
                 nodes.append({
                     "type": "api",
                     "name": item.get("name", "未命名接口"),
                     "data": item,
-                    "var": tk.BooleanVar(value=True) # 默认选中
+                    "var": tk.BooleanVar(value=True) 
                 })
-            elif "item" in item: # 说明是文件夹
+            elif "item" in item: 
                 nodes.append({
                     "type": "folder",
                     "name": item.get("name", "未命名文件夹"),
                     "children": self.build_tree(item["item"]),
-                    "var": tk.BooleanVar(value=True) # 文件夹全选框控制
+                    "var": tk.BooleanVar(value=True) 
                 })
         return nodes
 
     def parse_json_file(self):
-        """解析 JSON 文件并分层渲染界面组件"""
         json_path = self.file_entry.get().strip().strip('"')
         if not json_path or not os.path.exists(json_path):
             messagebox.showwarning("提示", "请先选择或拖入合法的 Postman JSON 文件！")
@@ -219,10 +224,8 @@ class PostmanConverterApp:
                 data = json.load(f)
             
             self.collection_name = data.get("info", {}).get("name", "API Documentation")
-            # 🚀 解析带层级的树结构
             self.tree_structure = self.build_tree(data.get("item", []))
             
-            # 清空旧界面
             for widget in self.scrollable_frame.winfo_children():
                 widget.destroy()
 
@@ -230,7 +233,6 @@ class PostmanConverterApp:
                 messagebox.showinfo("提示", "未在该文件中检测到任何接口或文件夹。")
                 return
 
-            # 渲染树结构到 UI 上
             self.render_tree_ui(self.tree_structure, self.scrollable_frame, indent=0)
             self.global_var.set(True)
                 
@@ -238,23 +240,20 @@ class PostmanConverterApp:
             messagebox.showerror("错误", f"解析失败。原因:\n{str(e)}")
 
     def render_tree_ui(self, nodes, parent_frame, indent=0):
-        """递归渲染带有缩进和多选控制的树状复选框界面"""
         for node in nodes:
             row_frame = tk.Frame(parent_frame)
             row_frame.pack(fill="x", anchor="w", padx=(indent * 20, 0), pady=2)
 
             if node["type"] == "folder":
-                # 📁 文件夹复选框 (支持一键控制其子项)
                 cb = tk.Checkbutton(
                     row_frame, 
                     text=f"📁 {node['name']}", 
                     variable=node["var"],
                     font=("Microsoft YaHei", 10, "bold"),
-                    fg="#a8071a", # 给文件夹配个特别的颜色区分
+                    fg="#a8071a", 
                     command=lambda n=node: self.toggle_folder_all(n)
                 )
                 cb.pack(side="left")
-                # 递归渲染子项
                 self.render_tree_ui(node["children"], parent_frame, indent + 1)
 
             elif node["type"] == "api":
@@ -262,7 +261,6 @@ class PostmanConverterApp:
                 method = req.get("method", "GET")
                 display_text = f" [{method}]  {node['name']}"
                 
-                # 📄 接口复选框
                 cb = tk.Checkbutton(
                     row_frame, 
                     text=display_text, 
@@ -273,7 +271,6 @@ class PostmanConverterApp:
                 cb.pack(side="left")
 
     def toggle_folder_all(self, folder_node):
-        """🚀 文件夹级别：一键全选/全不选它内部的所有子项"""
         if self.is_bulk_updating: return
         self.is_bulk_updating = True
         
@@ -291,7 +288,6 @@ class PostmanConverterApp:
         self.update_ui_linkage()
 
     def toggle_global_all(self):
-        """🚀 全局级别：一键全选/全不选整张表"""
         if self.is_bulk_updating: return
         self.is_bulk_updating = True
         
@@ -306,7 +302,6 @@ class PostmanConverterApp:
         self.is_bulk_updating = False
 
     def update_ui_linkage(self):
-        """🚀 智能联动：检查所有节点状态，正向更新 文件夹框 和 全局框 的状态"""
         if self.is_bulk_updating: return
         
         def check_and_update(nodes):
@@ -324,7 +319,6 @@ class PostmanConverterApp:
         self.global_var.set(global_status)
 
     def count_selected(self, nodes):
-        """统计被勾选的接口总数"""
         count = 0
         for node in nodes:
             if node["type"] == "api" and node["var"].get():
