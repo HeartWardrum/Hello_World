@@ -1,64 +1,75 @@
-# 降维打击：全部转成字符串、去空格、排序
-def force_compare(df1, df2):
-    def clean_df(df):
-        # 转成字符串 -> 去除两端空格 -> 排序列 -> 重置索引
-        d = df.astype(str).apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-        d = d.reindex(columns=sorted(d.columns))
-        return d.sort_values(by=list(d.columns)).reset_index(drop=True)
-
-    return clean_df(df1).equals(clean_df(df2))
-
-# 试一下这个，看看是不是变 True 了？
-print(force_compare(df1, df2))
-
-
 import pandas as pd
+import numpy as np
 
-def force_compare_and_show_diff(df1, df2):
-    # 1. 沿用你的标准化清洗逻辑
-    def clean_df(df):
-        # 注意：这里稍微改了一下，既然全部 astype(str) 了，所有列的 dtype 都会变成 object
-        # 所以直接 x.str.strip() 即可
-        d = df.astype(str).apply(lambda x: x.str.strip())
-        return d.reindex(columns=sorted(d.columns))
+# 假设你已经从数据库或文件中读取了这两个表：
+# df_t  对应 financialschema.dwd_lc_relationship (公司关联关系明细)
+# df_t1 对应 financialschema.dwd_CT_SystemConst (系统常量表)
 
-    clean1 = clean_df(df1)
-    clean2 = clean_df(df2)
+# ==========================================
+# 第一步：数据过滤 (提前过滤可以提高 Merge 效率)
+# ==========================================
 
-    # 2. 判断两边列名是否一致，如果列名都不一样，先提醒
-    if list(clean1.columns) != list(clean2.columns):
-        print("⚠️ 警告：两个 DataFrame 的列名不一致！")
-        print(f"df1 的列: {list(clean1.columns)}")
-        print(f"df2 的列: {list(clean2.columns)}")
-        return False
+# 1. 过滤 t 表 (dwd_lc_relationship)
+# 对应: where t.RelatedPartyCode is not null and t.CompanyCode <> t.RelatedPartyCode
+cond_t = df_t['RelatedPartyCode'].notna() & (df_t['CompanyCode'] != df_t['RelatedPartyCode'])
+t_filtered = df_t[cond_t].copy()
 
-    # 3. 核心：使用 merge 找出差异
-    # how='outer' 保留两边所有的数据
-    # indicator=True 会多出一列叫 '_merge'，值分别为 'left_only', 'right_only', 'both'
-    merged = pd.merge(clean1, clean2, how='outer', indicator=True)
+# 2. 过滤 t1 表 (dwd_CT_SystemConst)
+# 对应: and t1.DM IN (12,13,14,15,16,17,22) and t1.LB = 2067
+# 这里用到了你上一问刚学的 .isin()
+cond_t1 = df_t1['DM'].isin([12, 13, 14, 15, 16, 17, 22]) & (df_t1['LB'] == 2067)
+t1_filtered = df_t1[cond_t1].copy()
 
-    # 4. 提取差异
-    left_only = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
-    right_only = merged[merged['_merge'] == 'right_only'].drop(columns=['_merge'])
 
-    # 5. 打印结果
-    if left_only.empty and right_only.empty:
-        print("✨ 完美匹配！两个 DataFrame 完全相同。")
-        return True
-    else:
-        print("❌ 发现不一致！差异如下：\n")
-        
-        if not left_only.empty:
-            print(f"💡 【只在 df1 中存在】的行（或 df2 中没有/少掉的行），共 {len(left_only)} 行：")
-            print(left_only)
-            print("-" * 50)
-            
-        if not right_only.empty:
-            print(f"💡 【只在 df2 中存在】的行（或 df1 中多出的行），共 {len(right_only)} 行：")
-            print(right_only)
-            print("-" * 50)
-            
-        return False
+# ==========================================
+# 第二步：表连接 (Inner Join)
+# ==========================================
+# 对应: inner join ... on t.Relationship = t1.DM
+merged_df = pd.merge(
+    t_filtered, 
+    t1_filtered, 
+    left_on='Relationship', 
+    right_on='DM', 
+    how='inner'
+)
 
-# 调试时直接调用这个函数即可
-force_compare_and_show_diff(df1, df2)
+
+# ==========================================
+# 第三步：实现窗口函数去重 (Row_Number & rn=1)
+# ==========================================
+# 对应: row_number() over(partition by CompanyCode, RelatedPartyCode order by isnull(...) desc) ... where rn=1
+
+# 1. 处理 order by 里的 isnull(t.InfoPublDate, '1970-01-01...')
+merged_df['InfoPublDate_sort'] = merged_df['InfoPublDate'].fillna('1970-01-01 00:00:00')
+
+# 2. 排序 (按照 partition by 的字段和 order by 的字段排序)
+# partition 字段默认升序，InfoPublDate 要求 desc(降序)，所以 ascending 分别设为 True, True, False
+merged_df = merged_df.sort_values(
+    by=['CompanyCode', 'RelatedPartyCode', 'InfoPublDate_sort'], 
+    ascending=[True, True, False]
+)
+
+# 3. 取每个分组的第一条 (等价于 where rn = 1)
+# 按照 partition 字段去重，保留排在最前面的第一项
+final_df = merged_df.drop_duplicates(subset=['CompanyCode', 'RelatedPartyCode'], keep='first')
+
+
+# ==========================================
+# 第四步：提取最终字段并转换类型
+# ==========================================
+# 对应: cast(... as varchar) as company_id 等
+
+# 构建最终的临时表 (等价于 into #tmp_pnsi_03_rel_ent)
+tmp_pnsi_03_rel_ent = pd.DataFrame({
+    # 使用 .astype(str) 模拟 cast(... as varchar)
+    'company_id': final_df['CompanyCode'].astype(str),
+    'rel_company_id': final_df['RelatedPartyCode'].astype(str),
+    'rel_company_name': final_df['RelatedPartyName'],
+    'relationship_description': final_df['MS']
+})
+
+# 重置索引（保持数据干净）
+tmp_pnsi_03_rel_ent = tmp_pnsi_03_rel_ent.reset_index(drop=True)
+
+# 打印查看结果
+print(tmp_pnsi_03_rel_ent.head())
