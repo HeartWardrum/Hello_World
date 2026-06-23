@@ -2,11 +2,11 @@ import json
 import os
 import sys
 
-# 🚀 导入真正的拖拽库
+# 导入原生拖拽和 UI 库
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     import tkinter as tk
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, ttk
 except ImportError:
     print("❌ 错误：未检测到 tkinterdnd2 库！")
     print("请在环境里运行: pip install tkinterdnd2")
@@ -16,72 +16,86 @@ def get_desktop_path():
     """获取当前系统桌面的绝对路径"""
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
-def parse_postman_to_markdown(json_file_path, output_filename):
-    """核心转换逻辑"""
-    if not os.path.exists(json_file_path):
-        raise FileNotFoundError(f"找不到输入的 JSON 文件：{json_file_path}")
-        
+def generate_markdown_with_tree(structure, output_filename, collection_name):
+    """根据带层级的结构生成支持文件夹分层的 Markdown"""
     desktop_dir = get_desktop_path()
     output_md_path = os.path.join(desktop_dir, output_filename)
     if not output_md_path.endswith('.md'):
         output_md_path += '.md'
 
-    with open(json_file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    collection_name = data.get("info", {}).get("name", "API Documentation")
     markdown_content = [f"# {collection_name}\n", "--- \n"]
 
-    items = data.get("item", [])
-    for index, item in enumerate(items, 1):
-        name = item.get("name", "未命名接口")
-        request = item.get("request", {})
-        method = request.get("method", "GET")
+    def write_node(node, level=2):
+        """递归写入节点（支持无限层级文件夹）"""
+        # 如果是文件夹
+        if node["type"] == "folder":
+            # 根据层级选择标题级数，如 ## 文件夹名，### 子文件夹名
+            hashes = "#" * level
+            markdown_content.append(f"{hashes} 📁 {node['name']}\n")
+            for child in node["children"]:
+                write_node(child, level + 1)
         
-        url_data = request.get("url", {})
-        url = url_data.get("raw", "") if isinstance(url_data, dict) else str(url_data)
+        # 如果是接口且被勾选了
+        elif node["type"] == "api" and node["var"].get():
+            item = node["data"]
+            name = item.get("name", "未命名接口")
+            request = item.get("request", {})
+            method = request.get("method", "GET")
             
-        markdown_content.append(f"## {index}. {name}\n")
-        markdown_content.append(f"* **接口描述**: {name}")
-        markdown_content.append(f"* **请求 URL**: `{url}`")
-        markdown_content.append(f"* **请求方式**: `{method}`")
-        
-        body_data = request.get("body", {})
-        body_mode = body_data.get("mode", "")
-        
-        if body_mode == "raw":
-            raw_content = body_data.get("raw", "")
-            markdown_content.append(f"* **数据格式**: `application/json` \n")
-            markdown_content.append("### 📥 请求参数 (Request Body)\n")
+            # 🚀 新增功能：读取接口本身的 description 备注
+            desc = request.get("description", item.get("description", ""))
+            if isinstance(desc, dict):
+                desc = desc.get("content", "")
+            desc_text = desc if desc else "无"
+
+            url_data = request.get("url", {})
+            url = url_data.get("raw", "") if isinstance(url_data, dict) else str(url_data)
+                
+            hashes = "#" * level
+            markdown_content.append(f"{hashes} 📄 {name}\n")
+            markdown_content.append(f"* **接口功能**: {desc_text}")
+            markdown_content.append(f"* **请求 URL**: `{url}`")
+            markdown_content.append(f"* **请求方式**: `{method}`")
+            
+            body_data = request.get("body", {})
+            body_mode = body_data.get("mode", "")
+            
+            if body_mode == "raw":
+                raw_content = body_data.get("raw", "")
+                markdown_content.append(f"* **数据格式**: `application/json` \n")
+                markdown_content.append(f"{hashes}# 📥 请求参数 (Request Body)\n")
+                markdown_content.append("```json")
+                try:
+                    parsed_body = json.loads(raw_content)
+                    markdown_content.append(json.dumps(parsed_body, indent=4, ensure_ascii=False))
+                except:
+                    markdown_content.append(raw_content)
+                markdown_content.append("```\n")
+                
+                try:
+                    if isinstance(parsed_body, dict):
+                        markdown_content.append(f"{hashes}# 📊 参数说明\n")
+                        markdown_content.append("| 参数名 | 类型 | 是否必填 | 说明 |")
+                        markdown_content.append("| :--- | :--- | :--- | :--- |")
+                        for key, value in parsed_body.items():
+                            type_name = type(value).__name__
+                            type_map = {"str": "String", "int": "Integer", "list": "Array", "dict": "Object", "bool": "Boolean"}
+                            type_name = type_map.get(type_name, type_name)
+                            markdown_content.append(f"| `{key}` | {type_name} | 是/否 |  |")
+                        markdown_content.append("\n")
+                except:
+                    pass
+            else:
+                markdown_content.append("* **数据格式**: 无 / 非 raw 格式\n")
+                
+            markdown_content.append(f"{hashes}# 📤 返回参数 (Response)\n")
             markdown_content.append("```json")
-            try:
-                parsed_body = json.loads(raw_content)
-                markdown_content.append(json.dumps(parsed_body, indent=4, ensure_ascii=False))
-            except:
-                markdown_content.append(raw_content)
+            markdown_content.append("{\n    \"code\": 200,\n    \"msg\": \"success\",\n    \"data\": {}\n}")
             markdown_content.append("```\n")
-            
-            try:
-                if isinstance(parsed_body, dict):
-                    markdown_content.append("### 📊 参数说明\n")
-                    markdown_content.append("| 参数名 | 类型 | 是否必填 | 说明 |")
-                    markdown_content.append("| :--- | :--- | :--- | :--- |")
-                    for key, value in parsed_body.items():
-                        type_name = type(value).__name__
-                        type_map = {"str": "String", "int": "Integer", "list": "Array", "dict": "Object", "bool": "Boolean"}
-                        type_name = type_map.get(type_name, type_name)
-                        markdown_content.append(f"| `{key}` | {type_name} | 是/否 |  |")
-                    markdown_content.append("\n")
-            except:
-                pass
-        else:
-            markdown_content.append("* **数据格式**: 无 / 非 raw 格式\n")
-            
-        markdown_content.append("### 📤 返回参数 (Response)\n")
-        markdown_content.append("```json")
-        markdown_content.append("{\n    \"code\": 200,\n    \"msg\": \"success\",\n    \"data\": {}\n}")
-        markdown_content.append("```\n")
-        markdown_content.append("---\n")
+            markdown_content.append("---\n")
+
+    for root_node in structure:
+        write_node(root_node, level=2)
 
     with open(output_md_path, 'w', encoding='utf-8') as f:
         f.write("\n".join(markdown_content))
@@ -91,81 +105,256 @@ def parse_postman_to_markdown(json_file_path, output_filename):
 class PostmanConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Postman JSON 转 Markdown 工具 (支持原生拖拽)")
-        self.root.geometry("520x280")
-        self.root.resizable(False, False)
+        self.root.title("Postman 接口高级导出工具")
+        self.root.geometry("620x560")
         
-        font_style = ("Microsoft YaHei", 10)
-        
-        # 1. JSON文件路径组件
-        tk.Label(root, text="JSON 文件路径 (👉 直接把 JSON 文件拖到下方输入框内):", font=font_style).pack(anchor="w", padx=20, pady=(20, 2))
-        
+        self.font_style = ("Microsoft YaHei", 10)
+        self.tree_structure = []     # 存放带层级的节点树
+        self.collection_name = "API Documentation"
+        self.is_bulk_updating = False # 防止联动死循环
+
+        # 1. JSON文件路径区域
+        tk.Label(root, text="第一步：拖入或选择 Postman JSON 文件:", font=self.font_style).pack(anchor="w", padx=20, pady=(15, 2))
         file_frame = tk.Frame(root)
         file_frame.pack(fill="x", padx=20)
         
-        self.file_entry = tk.Entry(file_frame, font=font_style)
+        self.file_entry = tk.Entry(file_frame, font=self.font_style)
         self.file_entry.pack(side="left", fill="x", expand=True, ipady=3)
         
-        # 🚀 核心改动：注册拖拽事件
+        # 注册原生拖拽
         self.file_entry.drop_target_register(DND_FILES)
         self.file_entry.dnd_bind('<<Drop>>', self.handle_drop)
         
-        btn_browse = tk.Button(file_frame, text=" 浏览... ", font=font_style, command=self.browse_file)
+        btn_browse = tk.Button(file_frame, text=" 浏览... ", font=self.font_style, command=self.browse_file)
         btn_browse.pack(side="right", padx=(10, 0))
         
-        # 2. 输出文件名组件
-        tk.Label(root, text="输出 Markdown 文件名 (例如: 接口文档):", font=font_style).pack(anchor="w", padx=20, pady=(15, 2))
-        self.name_entry = tk.Entry(root, font=font_style)
+        # 解析按钮
+        self.btn_parse = tk.Button(root, text="🔍 点击解析并分层渲染接口", font=self.font_style, bg="#2f54eb", fg="white", command=self.parse_json_file)
+        self.btn_parse.pack(fill="x", padx=20, pady=10)
+
+        # 2. 接口列表顶部控制区
+        list_header_frame = tk.Frame(root)
+        list_header_frame.pack(fill="x", padx=20, pady=(5, 2))
+        
+        self.list_label = tk.Label(list_header_frame, text="第二步：请选择接口 (支持按文件夹全选):", font=self.font_style)
+        self.list_label.pack(side="left")
+        
+        # 全局总控制框
+        self.global_var = tk.BooleanVar(value=True)
+        self.cb_global = tk.Checkbutton(list_header_frame, text="全局全选/全不选", variable=self.global_var, font=("Microsoft YaHei", 9, "bold"), fg="#2f54eb", command=self.toggle_global_all)
+        self.cb_global.pack(side="right")
+        
+        # 接口列表展示区域（带滚动条）
+        self.canvas_frame = tk.Frame(root, bd=1, relief="sunken")
+        self.canvas_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        
+        self.canvas = tk.Canvas(self.canvas_frame, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.canvas_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        # 3. 输出文件名及转换按钮区域
+        tk.Label(root, text="第三步：输出 Markdown 文件名:", font=self.font_style).pack(anchor="w", padx=20, pady=(10, 2))
+        self.name_entry = tk.Entry(root, font=self.font_style)
         self.name_entry.pack(fill="x", padx=20, ipady=3)
         self.name_entry.insert(0, "API_Documentation")
         
-        # 3. 提示信息
-        self.tips_label = tk.Label(root, text=f"💡 转换成功后，文件将自动生成到您的桌面", font=("Microsoft YaHei", 9), fg="gray")
-        self.tips_label.pack(anchor="w", padx=20, pady=(10, 0))
-        
-        # 4. 开始转换按钮
-        self.btn_convert = tk.Button(root, text="🚀 开始转换并保存至桌面", font=("Microsoft YaHei", 11, "bold"), bg="#107c41", fg="white", command=self.start_conversion)
-        self.btn_convert.pack(fill="x", padx=20, pady=(20, 0), ipady=5)
+        self.btn_convert = tk.Button(root, text="🚀 转化选中的接口并保存至桌面", font=("Microsoft YaHei", 11, "bold"), bg="#107c41", fg="white", command=self.start_conversion)
+        self.btn_convert.pack(fill="x", padx=20, pady=(15, 15), ipady=5)
 
     def browse_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")])
         if file_path:
             self.file_entry.delete(0, tk.END)
             self.file_entry.insert(0, os.path.normpath(file_path))
-            
+            self.parse_json_file()
+
     def handle_drop(self, event):
-        """处理文件拖入事件，并清洗 Windows 自带的特殊符号"""
         path = event.data
-        # Windows 拖拽多个或带空格路径时，可能会用 {} 或 "" 包裹
-        if path.startswith('{') and path.endswith('}'):
-            path = path.strip('{}')
-        if path.startswith('"') and path.endswith('"'):
-            path = path.strip('"')
-            
+        if path.startswith('{') and path.endswith('}'): path = path.strip('{}')
+        if path.startswith('"') and path.endswith('"'): path = path.strip('"')
         path = os.path.normpath(path)
-        
         self.file_entry.delete(0, tk.END)
         self.file_entry.insert(0, path)
+        self.parse_json_file()
 
-    def start_conversion(self):
+    def build_tree(self, item_list):
+        """递归建立 UI 树状节点结构数据"""
+        nodes = []
+        for item in item_list:
+            if "request" in item: # 说明是接口
+                nodes.append({
+                    "type": "api",
+                    "name": item.get("name", "未命名接口"),
+                    "data": item,
+                    "var": tk.BooleanVar(value=True) # 默认选中
+                })
+            elif "item" in item: # 说明是文件夹
+                nodes.append({
+                    "type": "folder",
+                    "name": item.get("name", "未命名文件夹"),
+                    "children": self.build_tree(item["item"]),
+                    "var": tk.BooleanVar(value=True) # 文件夹全选框控制
+                })
+        return nodes
+
+    def parse_json_file(self):
+        """解析 JSON 文件并分层渲染界面组件"""
         json_path = self.file_entry.get().strip().strip('"')
-        out_name = self.name_entry.get().strip()
-        
-        if not json_path:
-            messagebox.showwarning("提示", "请先选择或拖入 Postman JSON 文件！")
-            return
-        if not out_name:
-            messagebox.showwarning("提示", "请填写输出的文档名称！")
+        if not json_path or not os.path.exists(json_path):
+            messagebox.showwarning("提示", "请先选择或拖入合法的 Postman JSON 文件！")
             return
             
         try:
-            saved_path = parse_postman_to_markdown(json_path, out_name)
-            messagebox.showinfo("成功", f"🎉 转换成功！\n文件已保存至桌面:\n{os.path.basename(saved_path)}")
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            self.collection_name = data.get("info", {}).get("name", "API Documentation")
+            # 🚀 解析带层级的树结构
+            self.tree_structure = self.build_tree(data.get("item", []))
+            
+            # 清空旧界面
+            for widget in self.scrollable_frame.winfo_children():
+                widget.destroy()
+
+            if not self.tree_structure:
+                messagebox.showinfo("提示", "未在该文件中检测到任何接口或文件夹。")
+                return
+
+            # 渲染树结构到 UI 上
+            self.render_tree_ui(self.tree_structure, self.scrollable_frame, indent=0)
+            self.global_var.set(True)
+                
         except Exception as e:
-            messagebox.showerror("错误", f"转换失败，原因:\n{str(e)}")
+            messagebox.showerror("错误", f"解析失败。原因:\n{str(e)}")
+
+    def render_tree_ui(self, nodes, parent_frame, indent=0):
+        """递归渲染带有缩进和多选控制的树状复选框界面"""
+        for node in nodes:
+            row_frame = tk.Frame(parent_frame)
+            row_frame.pack(fill="x", anchor="w", padx=(indent * 20, 0), pady=2)
+
+            if node["type"] == "folder":
+                # 📁 文件夹复选框 (支持一键控制其子项)
+                cb = tk.Checkbutton(
+                    row_frame, 
+                    text=f"📁 {node['name']}", 
+                    variable=node["var"],
+                    font=("Microsoft YaHei", 10, "bold"),
+                    fg="#a8071a", # 给文件夹配个特别的颜色区分
+                    command=lambda n=node: self.toggle_folder_all(n)
+                )
+                cb.pack(side="left")
+                # 递归渲染子项
+                self.render_tree_ui(node["children"], parent_frame, indent + 1)
+
+            elif node["type"] == "api":
+                req = node["data"].get("request", {})
+                method = req.get("method", "GET")
+                display_text = f" [{method}]  {node['name']}"
+                
+                # 📄 接口复选框
+                cb = tk.Checkbutton(
+                    row_frame, 
+                    text=display_text, 
+                    variable=node["var"],
+                    font=self.font_style,
+                    command=self.update_ui_linkage
+                )
+                cb.pack(side="left")
+
+    def toggle_folder_all(self, folder_node):
+        """🚀 文件夹级别：一键全选/全不选它内部的所有子项"""
+        if self.is_bulk_updating: return
+        self.is_bulk_updating = True
+        
+        status = folder_node["var"].get()
+        def set_status(node, val):
+            node["var"].set(val)
+            if node["type"] == "folder":
+                for child in node["children"]:
+                    set_status(child, val)
+                    
+        for child in folder_node["children"]:
+            set_status(child, status)
+            
+        self.is_bulk_updating = False
+        self.update_ui_linkage()
+
+    def toggle_global_all(self):
+        """🚀 全局级别：一键全选/全不选整张表"""
+        if self.is_bulk_updating: return
+        self.is_bulk_updating = True
+        
+        status = self.global_var.get()
+        def set_status_all(nodes, val):
+            for node in nodes:
+                node["var"].set(val)
+                if node["type"] == "folder":
+                    set_status_all(node["children"], val)
+                    
+        set_status_all(self.tree_structure, status)
+        self.is_bulk_updating = False
+
+    def update_ui_linkage(self):
+        """🚀 智能联动：检查所有节点状态，正向更新 文件夹框 和 全局框 的状态"""
+        if self.is_bulk_updating: return
+        
+        def check_and_update(nodes):
+            all_node_checked = True
+            for node in nodes:
+                if node["type"] == "folder":
+                    child_status = check_and_update(node["children"])
+                    node["var"].set(child_status)
+                    if not child_status: all_node_checked = False
+                elif node["type"] == "api":
+                    if not node["var"].get(): all_node_checked = False
+            return all_node_checked
+
+        global_status = check_and_update(self.tree_structure)
+        self.global_var.set(global_status)
+
+    def count_selected(self, nodes):
+        """统计被勾选的接口总数"""
+        count = 0
+        for node in nodes:
+            if node["type"] == "api" and node["var"].get():
+                count += 1
+            elif node["type"] == "folder":
+                count += self.count_selected(node["children"])
+        return count
+
+    def start_conversion(self):
+        if not self.tree_structure:
+            messagebox.showwarning("提示", "当前没有可转化的接口树，请先载入并解析 JSON 文件！")
+            return
+            
+        out_name = self.name_entry.get().strip()
+        if not out_name:
+            messagebox.showwarning("提示", "请填写输出的文档名称！")
+            return
+
+        selected_count = self.count_selected(self.tree_structure)
+        if selected_count == 0:
+            messagebox.showwarning("提示", "您没有勾选任何接口，请至少勾选一个进行转化！")
+            return
+
+        try:
+            saved_path = generate_markdown_with_tree(self.tree_structure, out_name, self.collection_name)
+            messagebox.showinfo("成功", f"🎉 转化成功！\n已成功将 {selected_count} 个接口按层级保存至桌面:\n{os.path.basename(saved_path)}")
+        except Exception as e:
+            messagebox.showerror("错误", f"转化失败，原因:\n{str(e)}")
 
 if __name__ == "__main__":
-    # 🚀 实例化支持拖拽的窗口，代替普通的 tk.Tk()
     window = TkinterDnD.Tk()
     app = PostmanConverterApp(window)
     window.mainloop()
