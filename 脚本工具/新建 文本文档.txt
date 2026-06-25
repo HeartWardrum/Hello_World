@@ -1,66 +1,4 @@
 import pandas as pd
-
-# 模拟包含 SQL Server 各种复杂原始类型的 DataFrame
-data = {
-    'column_name': ['id', 'name', 'create_time', 'price', 'ratio', 'photo', 'age', 'status', 'content', 'level', 'code'],
-    'sql_type': [
-        'bigint', 
-        'varchar(100)', 
-        'datetime2(7)', 
-        'decimal(18,4)', 
-        'float', 
-        'image', 
-        'int identity(1,1)', 
-        'smallint', 
-        'text', 
-        'tinyint', 
-        'nvarchar(max)' # 额外模拟一个 nvarchar
-    ]
-}
-df = pd.DataFrame(data)
-
-def convert_to_dm_strict(sql_type):
-    # 1. 转换为小写并去除前后的空格，方便统一匹配
-    s = str(sql_type).lower().strip()
-    
-    # 2. 核心映射逻辑（严格对应达梦支持的 11 种类型）
-    if 'bigint' in s:
-        return 'BIGINT'
-    elif 'varchar' in s or 'nvarchar' in s:
-        return 'VARCHAR'
-    elif 'datetime' in s or 'timestamp' in s or 'date' in s:
-        return 'DATETIME'
-    elif 'decimal' in s or 'numeric' in s:
-        return 'DECIMAL'
-    elif 'float' in s or 'double' in s:
-        return 'FLOAT'
-    elif 'image' in s or 'binary' in s or 'varbinary' in s:
-        return 'IMAGE'
-    elif 'tinyint' in s:
-        return 'TINYINT'  # 注意：由于 tinyint 包含 int，必须放在 int 之前判断
-    elif 'smallint' in s:
-        return 'SMALLINT' # 注意：由于 smallint 包含 int，必须放在 int 之前判断
-    elif 'int' in s:
-        return 'INT'
-    elif 'text' in s or 'ntext' in s:
-        return 'TEXT'
-    elif 'char' in s:
-        return 'CHAR'
-        
-    # 3. 如果以上都不满足，默认转为大写作为兜底
-    return sql_type.upper()
-
-# 运用 apply 函数生成达梦的目标类型列
-df['dm_type'] = df['sql_type'].apply(convert_to_dm_strict)
-
-# 打印查看清洗转换后的完整对照结果
-print(df[['column_name', 'sql_type', 'dm_type']])
-
-
-
-
-
-import pandas as pd
 import re
 
 # 模拟你的原始数据
@@ -68,31 +6,38 @@ data = {
     'sql_type': [
         'bigint', 
         'varchar(100)', 
-        'datetime2(7)', 
         'decimal(38,6)', 
-        'float', 
         'int identity(1,1)', 
         'nvarchar(max)',
+        'numeric(10,2)',
         'char(10)'
     ]
 }
 df = pd.DataFrame(data)
 
+# 函数 1：提取长度 (逗号左边的数字或唯一数字)
 def extract_length(sql_type):
     s = str(sql_type).strip()
-    
-    # 使用正则查找括号及括号内部的内容
-    # \((.*?)\) 意思是匹配左括号 '(' 到右括号 ')' 之间的任意字符
-    match = re.search(r'\((.*?)\)', s)
-    
+    # 匹配括号，并尝试抓取逗号前的部分 (.*?)(?:,.*)?
+    match = re.search(r'\((.*?)(?:,.*)?\)', s)
     if match:
-        # 如果匹配到了，返回括号里面的内容（如 '100', '38,6', 'max' 等）
-        return match.group(1)
-    else:
-        # 如果没有括号，返回 None（在 DataFrame 中表现为空值 NaN）
-        return None
+        res = match.group(1).strip()
+        # 如果是 max，达梦不支持 max 关键字，通常可以留空或者转为数字，这里先按你要求保留或留空
+        return res
+    return None
 
-# 应用函数，添加新的一列 'field_length'
+# 函数 2：提取精度 (逗号右边的数字)
+def extract_scale(sql_type):
+    s = str(sql_type).strip()
+    # 匹配括号中带有逗号的内容，并抓取逗号后面的数字
+    match = re.search(r'\(.*?,\s*(.*?)\)', s)
+    if match:
+        return match.group(1).strip()
+    return None
+
+# 应用到 DataFrame 中
 df['field_length'] = df['sql_type'].apply(extract_length)
+df['field_scale'] = df['sql_type'].apply(extract_scale)
 
+# 打印查看结果
 print(df)
