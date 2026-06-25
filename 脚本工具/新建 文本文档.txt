@@ -1,16 +1,16 @@
 WITH IndexDetails AS (
     SELECT 
-        t.name COLLATE database_default AS TableName,
-        i.name COLLATE database_default AS IndexName,
-        -- 将 SQL Server 的索引类型翻译为达梦合法关键字
+        -- 💡 新增：提取并转换模式名
+        LOWER(s.name COLLATE database_default) AS SchemaName,
+        LOWER(t.name COLLATE database_default) AS TableName,
+        LOWER(i.name COLLATE database_default) AS IndexName,
         CASE 
             WHEN i.type_desc = 'CLUSTERED' THEN 'CLUSTER'
             ELSE '' 
         END AS IndexType,
         i.is_unique AS IsUnique,
-        -- 1. 拼接键列：去掉中括号，去掉 ASC，保留 DESC
         STUFF((
-            SELECT ', ' + c.name COLLATE database_default + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
+            SELECT ', ' + LOWER(c.name COLLATE database_default) + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
             FROM sys.index_columns ic
             JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
             WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
@@ -18,7 +18,6 @@ WITH IndexDetails AS (
             FOR XML PATH('')
         ), 1, 2, '') AS KeyColumns,
         
-        -- 💡 核心新增：按表名分组，在组内对索引名排序，生成从 1 开始的序号
         ROW_NUMBER() OVER (
             PARTITION BY t.object_id 
             ORDER BY i.name COLLATE database_default
@@ -26,21 +25,23 @@ WITH IndexDetails AS (
         
     FROM sys.indexes i
     JOIN sys.objects t ON i.object_id = t.object_id
+    -- 💡 核心改动：关联 sys.schemas 表获取模式名
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
     WHERE t.is_ms_shipped = 0 
       AND t.type COLLATE database_default = 'U' 
       AND i.type > 0 
       AND i.is_primary_key = 0 
 )
 SELECT 
+    SchemaName AS [模式名],
     TableName AS [表名],
-    -- 💡 核心新增：将原生序号格式化为双位数（如 01, 02, 11）
     RIGHT('0' + CAST(GroupSeqRaw AS VARCHAR(2)), 2) AS [组内序号],
     IndexName AS [索引名],
     KeyColumns AS [涉及字段名],
-    -- 动态组合成符合达梦（DM）语法的 CREATE INDEX 语句
+    -- 💡 核心改动：在 ON 后面加上 SchemaName.TableName
     'CREATE ' + 
     CASE WHEN IsUnique = 1 THEN 'UNIQUE ' ELSE '' END + 
     CASE WHEN IndexType <> '' THEN IndexType + ' ' ELSE '' END + 
-    'INDEX ' + IndexName + ' ON ' + TableName + ' (' + KeyColumns + ');' AS [达梦建索引SQL语句]
+    'INDEX ' + IndexName + ' ON ' + SchemaName + '.' + TableName + ' (' + KeyColumns + ');' AS [达梦建索引SQL语句]
 FROM IndexDetails
-ORDER BY TableName, [组内序号];
+ORDER BY SchemaName, TableName, [组内序号];
