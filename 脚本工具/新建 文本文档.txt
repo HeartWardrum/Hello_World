@@ -1,47 +1,70 @@
-WITH IndexDetails AS (
-    SELECT 
-        -- 💡 新增：提取并转换模式名
-        LOWER(s.name COLLATE database_default) AS SchemaName,
-        LOWER(t.name COLLATE database_default) AS TableName,
-        LOWER(i.name COLLATE database_default) AS IndexName,
-        CASE 
-            WHEN i.type_desc = 'CLUSTERED' THEN 'CLUSTER'
-            ELSE '' 
-        END AS IndexType,
-        i.is_unique AS IsUnique,
-        STUFF((
-            SELECT ', ' + LOWER(c.name COLLATE database_default) + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
-            FROM sys.index_columns ic
-            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
-            ORDER BY ic.key_ordinal
-            FOR XML PATH('')
-        ), 1, 2, '') AS KeyColumns,
+import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+
+def get_dm_engine(user, password, host, port, schema) -> Engine:
+    """
+    创建达梦数据库的 SQLAlchemy Engine
+    
+    :param user: 用户名
+    :param password: 密码
+    :param host: 数据库IP
+    :param port: 端口号 (达梦默认通常是 5236)
+    :param schema: 模式名/数据库名 (通常达梦里用户名和Schema同名且大写)
+    :return: SQLAlchemy Engine 对象
+    """
+    # 达梦的 SQLAlchemy 连接字符串格式：dm+dmpython://user:password@host:port/schema
+    connection_url = f"dm+dmpython://{user}:{password}@{host}:{port}/{schema}"
+    
+    # 创建引擎
+    # echo=False: 如果需要查看底层执行的 SQL，可以改为 True
+    engine = create_engine(connection_url, echo=False)
+    return engine
+
+# ==================== 使用示例 ====================
+if __name__ == "__main__":
+    # 1. 配置你的达梦数据库连接信息
+    DB_USER = "SYSDBA"       # 达梦默认管理员账号
+    DB_PASSWORD = "your_password"
+    DB_HOST = "127.0.0.1"
+    DB_PORT = 5236          # 达梦默认端口
+    DB_SCHEMA = "SYSDBA"     # 默认模式名
+    
+    # 2. 获取连接引擎
+    engine = get_dm_engine(DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_SCHEMA)
+    
+    try:
+        # ---- 示例 A: 使用 Pandas 从达梦读取数据 ----
+        sql_query = "SELECT * FROM my_table WHERE ROWNUM <= 10"  # 达梦支持 ROWNUM 或 LIMIT
         
-        ROW_NUMBER() OVER (
-            PARTITION BY t.object_id 
-            ORDER BY i.name COLLATE database_default
-        ) AS GroupSeqRaw
+        # 使用 engine 顺畅读取
+        df = pd.read_sql(sql_query, con=engine)
+        print("--- 读取数据成功 ---")
+        print(df.head())
         
-    FROM sys.indexes i
-    JOIN sys.objects t ON i.object_id = t.object_id
-    -- 💡 核心改动：关联 sys.schemas 表获取模式名
-    JOIN sys.schemas s ON t.schema_id = s.schema_id
-    WHERE t.is_ms_shipped = 0 
-      AND t.type COLLATE database_default = 'U' 
-      AND i.type > 0 
-      AND i.is_primary_key = 0 
-)
-SELECT 
-    SchemaName AS [模式名],
-    TableName AS [表名],
-    RIGHT('0' + CAST(GroupSeqRaw AS VARCHAR(2)), 2) AS [组内序号],
-    IndexName AS [索引名],
-    KeyColumns AS [涉及字段名],
-    -- 💡 核心改动：在 ON 后面加上 SchemaName.TableName
-    'CREATE ' + 
-    CASE WHEN IsUnique = 1 THEN 'UNIQUE ' ELSE '' END + 
-    CASE WHEN IndexType <> '' THEN IndexType + ' ' ELSE '' END + 
-    'INDEX ' + IndexName + ' ON ' + SchemaName + '.' + TableName + ' (' + KeyColumns + ');' AS [达梦建索引SQL语句]
-FROM IndexDetails
-ORDER BY SchemaName, TableName, [组内序号];
+        # ---- 示例 B: 使用 Pandas 将数据写入达梦 ----
+        # 创建一个临时的测试 DataFrame
+        test_data = {
+            'id': [1, 2, 3],
+            'name': ['张三', '李四', '王五'],
+            'age': [25, 30, 35]
+        }
+        df_to_save = pd.DataFrame(test_data)
+        
+        # 写入达梦数据库
+        # if_exists: 'fail' (默认), 'replace' (删除表重建), 'append' (追加)
+        # index=False: 不把 Pandas 的索引作为单独一列写入
+        df_to_save.to_sql(
+            name='test_pandas_table', 
+            con=engine, 
+            if_exists='replace', 
+            index=False
+        )
+        print("\n--- 数据写入成功 ---")
+        
+    except Exception as e:
+        print(f"数据库操作发生错误: {e}")
+        
+    finally:
+        # 释放资源
+        engine.dispose()
