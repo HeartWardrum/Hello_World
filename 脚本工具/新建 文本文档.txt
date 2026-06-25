@@ -55,3 +55,44 @@ df['dm_type'] = df['sql_type'].apply(convert_to_dm_strict)
 
 # 打印查看清洗转换后的完整对照结果
 print(df[['column_name', 'sql_type', 'dm_type']])
+
+
+
+
+
+import pandas as pd
+import re
+
+# 模拟你的原始数据
+data = {
+    'sql_type': [
+        'bigint', 
+        'varchar(100)', 
+        'datetime2(7)', 
+        'decimal(38,6)', 
+        'float', 
+        'int identity(1,1)', 
+        'nvarchar(max)',
+        'char(10)'
+    ]
+}
+df = pd.DataFrame(data)
+
+def extract_length(sql_type):
+    s = str(sql_type).strip()
+    
+    # 使用正则查找括号及括号内部的内容
+    # \((.*?)\) 意思是匹配左括号 '(' 到右括号 ')' 之间的任意字符
+    match = re.search(r'\((.*?)\)', s)
+    
+    if match:
+        # 如果匹配到了，返回括号里面的内容（如 '100', '38,6', 'max' 等）
+        return match.group(1)
+    else:
+        # 如果没有括号，返回 None（在 DataFrame 中表现为空值 NaN）
+        return None
+
+# 应用函数，添加新的一列 'field_length'
+df['field_length'] = df['sql_type'].apply(extract_length)
+
+print(df)
