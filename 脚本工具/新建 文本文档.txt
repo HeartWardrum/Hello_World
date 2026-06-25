@@ -1,44 +1,38 @@
 WITH IndexDetails AS (
     SELECT 
-        -- 强行指定表名、索引名、类型描述使用当前数据库默认排序规则，防止外层拼接报错
         t.name COLLATE database_default AS TableName,
         i.name COLLATE database_default AS IndexName,
-        i.type_desc COLLATE database_default AS IndexType,
+        -- 将 SQL Server 的索引类型翻译为达梦合法关键字
+        CASE 
+            WHEN i.type_desc = 'CLUSTERED' THEN 'CLUSTER'
+            ELSE '' -- 达梦不支持 NONCLUSTERED，普通索引直接留空即可
+        END AS IndexType,
         i.is_unique AS IsUnique,
-        -- 1. 拼接索引包含的键列 (Key Columns)
+        -- 1. 拼接键列：去掉中括号，去掉 ASC，保留 DESC
         STUFF((
-            SELECT ', [' + c.name COLLATE database_default + ']' + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE ' ASC' END
+            SELECT ', ' + c.name COLLATE database_default + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
             FROM sys.index_columns ic
             JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
             WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
             ORDER BY ic.key_ordinal
             FOR XML PATH('')
-        ), 1, 2, '') AS KeyColumns,
-        -- 2. 拼接索引附带的包含列 (Included Columns)
-        STUFF((
-            SELECT ', [' + c.name COLLATE database_default + ']'
-            FROM sys.index_columns ic
-            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
-            ORDER BY ic.index_column_id
-            FOR XML PATH('')
-        ), 1, 2, '') AS IncludedColumns
+        ), 1, 2, '') AS KeyColumns
     FROM sys.indexes i
     JOIN sys.objects t ON i.object_id = t.object_id
     WHERE t.is_ms_shipped = 0 
-      -- 系统表字段比较时，也强行统一规则
       AND t.type COLLATE database_default = 'U' 
       AND i.type > 0 
+      -- 排除主键约束自动生成的索引（达梦导入表结构时通常会自带主键约束，无需重复创建索引）
+      AND i.is_primary_key = 0 
 )
 SELECT 
     TableName AS [表名],
     IndexName AS [索引名],
     KeyColumns AS [涉及字段名],
-    -- 3. 动态组合成完整的 CREATE INDEX 语句
+    -- 2. 动态组合成符合达梦（DM）语法的 CREATE INDEX 语句
     'CREATE ' + 
     CASE WHEN IsUnique = 1 THEN 'UNIQUE ' ELSE '' END + 
-    IndexType + ' INDEX [' + IndexName + '] ON [' + TableName + '] (' + KeyColumns + ')' + 
-    CASE WHEN IncludedColumns IS NOT NULL THEN ' INCLUDE (' + IncludedColumns + ')' ELSE '' END + 
-    ';' AS [建索引SQL语句]
+    CASE WHEN IndexType <> '' THEN IndexType + ' ' ELSE '' END + 
+    'INDEX ' + IndexName + ' ON ' + TableName + ' (' + KeyColumns + ');' AS [达梦建索引SQL语句]
 FROM IndexDetails
 ORDER BY TableName, IndexName;
