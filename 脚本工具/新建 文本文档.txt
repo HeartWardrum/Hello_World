@@ -1,26 +1,57 @@
 import pandas as pd
 
+# 模拟包含 SQL Server 各种复杂原始类型的 DataFrame
 data = {
-    'column_name': ['id', 'name', 'remark'],
-    'sql_type': ['int', 'varchar(100)', 'nvarchar(200)']
+    'column_name': ['id', 'name', 'create_time', 'price', 'ratio', 'photo', 'age', 'status', 'content', 'level', 'code'],
+    'sql_type': [
+        'bigint', 
+        'varchar(100)', 
+        'datetime2(7)', 
+        'decimal(18,4)', 
+        'float', 
+        'image', 
+        'int identity(1,1)', 
+        'smallint', 
+        'text', 
+        'tinyint', 
+        'nvarchar(max)' # 额外模拟一个 nvarchar
+    ]
 }
 df = pd.DataFrame(data)
 
-# 定义转换逻辑的函数
-def convert_to_dm(sql_type):
-    # 转换为小写字符串，防止大小写不一致
-    sql_type_lower = str(sql_type).lower()
+def convert_to_dm_strict(sql_type):
+    # 1. 转换为小写并去除前后的空格，方便统一匹配
+    s = str(sql_type).lower().strip()
     
-    if 'varchar' in sql_type_lower:
+    # 2. 核心映射逻辑（严格对应达梦支持的 11 种类型）
+    if 'bigint' in s:
+        return 'BIGINT'
+    elif 'varchar' in s or 'nvarchar' in s:
         return 'VARCHAR'
-    elif 'int' in sql_type_lower:
+    elif 'datetime' in s or 'timestamp' in s or 'date' in s:
+        return 'DATETIME'
+    elif 'decimal' in s or 'numeric' in s:
+        return 'DECIMAL'
+    elif 'float' in s or 'double' in s:
+        return 'FLOAT'
+    elif 'image' in s or 'binary' in s or 'varbinary' in s:
+        return 'IMAGE'
+    elif 'tinyint' in s:
+        return 'TINYINT'  # 注意：由于 tinyint 包含 int，必须放在 int 之前判断
+    elif 'smallint' in s:
+        return 'SMALLINT' # 注意：由于 smallint 包含 int，必须放在 int 之前判断
+    elif 'int' in s:
         return 'INT'
-    elif 'datetime' in sql_type_lower:
-        return 'TIMESTAMP'
-    # 如果没匹配到，保留原样或返回自定义默认值
-    return sql_type.upper() 
+    elif 'text' in s or 'ntext' in s:
+        return 'TEXT'
+    elif 'char' in s:
+        return 'CHAR'
+        
+    # 3. 如果以上都不满足，默认转为大写作为兜底
+    return sql_type.upper()
 
-# 运用 apply 函数应用到整列
-df['dm_type'] = df['sql_type'].apply(convert_to_dm)
+# 运用 apply 函数生成达梦的目标类型列
+df['dm_type'] = df['sql_type'].apply(convert_to_dm_strict)
 
-print(df)
+# 打印查看清洗转换后的完整对照结果
+print(df[['column_name', 'sql_type', 'dm_type']])
