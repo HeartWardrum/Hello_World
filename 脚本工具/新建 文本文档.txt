@@ -1,43 +1,43 @@
-import pandas as pd
-import re
-
-# 模拟你的原始数据
-data = {
-    'sql_type': [
-        'bigint', 
-        'varchar(100)', 
-        'decimal(38,6)', 
-        'int identity(1,1)', 
-        'nvarchar(max)',
-        'numeric(10,2)',
-        'char(10)'
-    ]
-}
-df = pd.DataFrame(data)
-
-# 函数 1：提取长度 (逗号左边的数字或唯一数字)
-def extract_length(sql_type):
-    s = str(sql_type).strip()
-    # 匹配括号，并尝试抓取逗号前的部分 (.*?)(?:,.*)?
-    match = re.search(r'\((.*?)(?:,.*)?\)', s)
-    if match:
-        res = match.group(1).strip()
-        # 如果是 max，达梦不支持 max 关键字，通常可以留空或者转为数字，这里先按你要求保留或留空
-        return res
-    return None
-
-# 函数 2：提取精度 (逗号右边的数字)
-def extract_scale(sql_type):
-    s = str(sql_type).strip()
-    # 匹配括号中带有逗号的内容，并抓取逗号后面的数字
-    match = re.search(r'\(.*?,\s*(.*?)\)', s)
-    if match:
-        return match.group(1).strip()
-    return None
-
-# 应用到 DataFrame 中
-df['field_length'] = df['sql_type'].apply(extract_length)
-df['field_scale'] = df['sql_type'].apply(extract_scale)
-
-# 打印查看结果
-print(df)
+WITH IndexDetails AS (
+    SELECT 
+        t.name AS TableName,
+        i.name AS IndexName,
+        i.type_desc AS IndexType,
+        i.is_unique AS IsUnique,
+        -- 1. 拼接索引包含的键列 (Key Columns)
+        STUFF((
+            SELECT ', [' + c.name + ']' + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE ' ASC' END
+            FROM sys.index_columns ic
+            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+            ORDER BY ic.key_ordinal
+            FOR XML PATH('')
+        ), 1, 2, '') AS KeyColumns,
+        -- 2. 拼接索引附带的包含列 (Included Columns，如果有的话)
+        STUFF((
+            SELECT ', [' + c.name + ']'
+            FROM sys.index_columns ic
+            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
+            ORDER BY ic.index_column_id
+            FOR XML PATH('')
+        ), 1, 2, '') AS IncludedColumns
+    FROM sys.indexes i
+    JOIN sys.objects t ON i.object_id = t.object_id
+    -- 仅查询用户自定义的表，排除系统表，同时排除堆表(HEAP)
+    WHERE t.is_ms_shipped = 0 
+      AND t.type = 'U' 
+      AND i.type > 0 
+)
+SELECT 
+    TableName AS [表名],
+    IndexName AS [索引名],
+    KeyColumns AS [涉及字段名],
+    -- 3. 动态组合成完整的 CREATE INDEX 语句
+    'CREATE ' + 
+    CASE WHEN IsUnique = 1 THEN 'UNIQUE ' ELSE '' END + 
+    IndexType + ' INDEX [' + IndexName + '] ON [' + TableName + '] (' + KeyColumns + ')' + 
+    CASE WHEN IncludedColumns IS NOT NULL THEN ' INCLUDE (' + IncludedColumns + ')' ELSE '' END + 
+    ';' AS [建索引SQL语句]
+FROM IndexDetails
+ORDER BY TableName, IndexName;
