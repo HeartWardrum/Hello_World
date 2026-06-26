@@ -1,12 +1,1 @@
-from sqlalchemy import create_engine
-from sqlalchemy.dialects import registry
-
-def get_dm_engine(user, password, host, port, schema):
-    # 1. 动态注册达梦方言（防止 SQLAlchemy 找不到插件）
-    registry.register("dm.dmpython", "dmPython.sqlalchemy.dialect", "DmDialect")
-    registry.register("dm", "dmPython.sqlalchemy.dialect", "DmDialect")
-    
-    # 2. 构建连接字符串并创建引擎
-    connection_url = f"dm+dmpython://{user}:{password}@{host}:{port}/{schema}"
-    engine = create_engine(connection_url, echo=False)
-    return engine
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
