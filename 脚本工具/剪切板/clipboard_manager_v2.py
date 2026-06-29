@@ -1,14 +1,14 @@
 """
 轻量级剪贴板管理工具 v2 - 性能优化版
 优化项：
-  1. 启动提速：HistoryStore 懒加载图片（只存路径，按需读取）；异步后台加载历史
-  2. 唤起提速：_do_refresh 增量渲染，复用已有 Item；唤起时只刷新 dirty 数据
+  1. 启动提速：HistoryStore 懒加载图片（只存路径，按需读取）
+  2. 唤起提速：Alt+V 先 show 再刷新；列表增量 prepend/移除；可见区缩略图懒加载
   3. 鼠标位置唤起：窗口出现在当前鼠标旁边，自动适应屏幕边缘
   4. 剪贴板轮询降频至 800ms（可配置），避免与 UI 抢资源
   5. 图片内容懒读取（只有粘贴/预览时才真正读文件）
   6. 搜索去抖动从 300ms→200ms，提升响应感
   7. PermanentStore 使用 WAL 模式，降低 SQLite 锁开销
-  8. 主窗口 show() 时跳过 refresh（若数据未变）
+  8. 数据未变时跳过列表重建
 """
 
 import sys
@@ -532,18 +532,14 @@ class EntryItemWidget(QWidget):
 # ─────────────────────────── 全局快捷键 ───────────────────────────
 class GlobalHotkeyManager(QThread):
     signal_alt_v = pyqtSignal()
-    signal_ctrl_g = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self._running = True
         self.user32 = ctypes.windll.user32
         self.HOTKEY_ALT_V_ID = 1001
-        self.HOTKEY_CTRL_G_ID = 1002
         self.MOD_ALT = 0x0001
-        self.MOD_CONTROL = 0x0002
         self.VK_V = 0x56
-        self.VK_G = 0x47
         self._thread_id = None
 
     def start_listening(self):
@@ -553,9 +549,8 @@ class GlobalHotkeyManager(QThread):
     def run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         res1 = self.user32.RegisterHotKey(None, self.HOTKEY_ALT_V_ID, self.MOD_ALT, self.VK_V)
-        res2 = self.user32.RegisterHotKey(None, self.HOTKEY_CTRL_G_ID, self.MOD_CONTROL, self.VK_G)
-        if not res1 or not res2:
-            print("警告: 全局热键注册失败（可能已被其他程序占用）")
+        if not res1:
+            print("警告: 全局热键 Alt+V 注册失败（可能已被其他程序占用）")
 
         msg = wintypes.MSG()
         while self._running:
@@ -564,8 +559,6 @@ class GlobalHotkeyManager(QThread):
                 if msg.message == 0x0312:
                     if msg.wParam == self.HOTKEY_ALT_V_ID:
                         self.signal_alt_v.emit()
-                    elif msg.wParam == self.HOTKEY_CTRL_G_ID:
-                        self.signal_ctrl_g.emit()
                 elif msg.message == 0x0012:
                     break
                 self.user32.TranslateMessage(ctypes.byref(msg))
@@ -578,7 +571,6 @@ class GlobalHotkeyManager(QThread):
         if self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
         self.user32.UnregisterHotKey(None, self.HOTKEY_ALT_V_ID)
-        self.user32.UnregisterHotKey(None, self.HOTKEY_CTRL_G_ID)
         self.wait(2000)
 
 
@@ -655,6 +647,8 @@ class MainWindow(QMainWindow):
         self._thumb_pool.setMaxThreadCount(4)
         self._item_map: dict = {}      # entry_id -> (item, widget)
         self._current_ids: list = []   # 当前列表顺序（用于增量对比）
+        self._thumb_loaded: set = set()
+        self._thumb_loading: set = set()
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -764,6 +758,9 @@ class MainWindow(QMainWindow):
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
         self.list_widget.installEventFilter(self)
+        self.list_widget.verticalScrollBar().valueChanged.connect(
+            lambda _: self._schedule_visible_thumbnails()
+        )
         main_layout.addWidget(self.list_widget)
 
         status_bar = QHBoxLayout()
@@ -834,6 +831,134 @@ class MainWindow(QMainWindow):
         self._search_keyword = text.strip()
         self._search_timer.start()
 
+    def _entry_row_height(self, entry: ClipEntry) -> int:
+        return 140 if entry.type == "image" else 95
+
+    def _update_status(self, count: int):
+        mode_str = "普通历史" if self._mode == "history" else "永久保存"
+        self.status_label.setText(f"{mode_str}: {count} 条")
+
+    def _insert_entry_at(self, row: int, entry: ClipEntry) -> QListWidgetItem:
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(max(self.list_widget.width() - 10, 200),
+                               self._entry_row_height(entry)))
+        item.setData(Qt.UserRole, entry)
+        if row < 0:
+            self.list_widget.addItem(item)
+        else:
+            self.list_widget.insertItem(row, item)
+        widget = EntryItemWidget(entry)
+        self.list_widget.setItemWidget(item, widget)
+        self._item_map[entry.id] = (item, widget)
+        return item
+
+    def _prepend_entry(self, entry: ClipEntry):
+        self._insert_entry_at(0, entry)
+        self.list_widget.setCurrentRow(0)
+
+    def _remove_entry_by_id(self, entry_id: str):
+        pair = self._item_map.pop(entry_id, None)
+        if not pair:
+            return
+        item, widget = pair
+        row = self.list_widget.row(item)
+        if row >= 0:
+            self.list_widget.takeItem(row)
+        widget.deleteLater()
+        self._thumb_loaded.discard(entry_id)
+        self._thumb_loading.discard(entry_id)
+
+    def _move_entry_to_top(self, entry_id: str, entry: ClipEntry):
+        pair = self._item_map.get(entry_id)
+        if not pair:
+            self._prepend_entry(entry)
+            return
+        item, _ = pair
+        row = self.list_widget.row(item)
+        if row <= 0:
+            item.setData(Qt.UserRole, entry)
+            return
+        taken = self.list_widget.takeItem(row)
+        taken.setData(Qt.UserRole, entry)
+        self.list_widget.insertItem(0, taken)
+        self.list_widget.setCurrentRow(0)
+
+    def _try_incremental_sync(self, entries: list, new_ids: list) -> bool:
+        old_ids = self._current_ids
+        if not old_ids:
+            return False
+
+        # 顶部新增（常见：复制新内容）
+        if (new_ids and new_ids[0] not in old_ids and
+                new_ids[1:] == old_ids[:len(new_ids) - 1]):
+            self._prepend_entry(entries[0])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+
+        # 重复内容移到顶部
+        if (new_ids and new_ids[0] in old_ids and
+                new_ids[1:] == [i for i in old_ids if i != new_ids[0]]):
+            self._move_entry_to_top(new_ids[0], entries[0])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+
+        # 尾部裁剪（超出 max_count / 过期清理）
+        if len(new_ids) < len(old_ids) and new_ids == old_ids[:len(new_ids)]:
+            while len(self._current_ids) > len(new_ids):
+                self._remove_entry_by_id(self._current_ids[-1])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+
+        # 单条删除
+        if len(new_ids) == len(old_ids) - 1:
+            removed = set(old_ids) - set(new_ids)
+            if len(removed) == 1 and new_ids == [i for i in old_ids if i not in removed]:
+                self._remove_entry_by_id(removed.pop())
+                self._current_ids = new_ids
+                self._update_status(len(entries))
+                return True
+
+        return False
+
+    def _full_rebuild_list(self, entries: list, new_ids: list):
+        self.list_widget.setUpdatesEnabled(False)
+        self.list_widget.clear()
+        self._item_map.clear()
+        self._thumb_loaded.clear()
+        self._thumb_loading.clear()
+
+        for entry in entries:
+            self._insert_entry_at(-1, entry)
+
+        self.list_widget.setUpdatesEnabled(True)
+        self._current_ids = new_ids
+        self._update_status(len(entries))
+
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+        self._schedule_visible_thumbnails()
+
+    def _schedule_visible_thumbnails(self):
+        if not PIL_AVAILABLE or self.list_widget.count() == 0:
+            return
+        viewport = self.list_widget.viewport().rect()
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if not item:
+                continue
+            entry = item.data(Qt.UserRole)
+            if entry.type != "image":
+                continue
+            if entry.id in self._thumb_loaded or entry.id in self._thumb_loading:
+                continue
+            if not viewport.intersects(self.list_widget.visualItemRect(item)):
+                continue
+            self._thumb_loading.add(entry.id)
+            self._thumb_pool.start(ThumbnailLoader(entry.id, entry, self._thumb_signals))
+
     def _do_refresh(self):
         kw = self._search_keyword
         if self._mode == "history":
@@ -843,40 +968,19 @@ class MainWindow(QMainWindow):
 
         new_ids = [e.id for e in entries]
 
-        # ★ 增量优化：若列表内容和顺序完全一致，跳过重建
-        if new_ids == self._current_ids and not kw:
+        if new_ids == self._current_ids:
+            self._update_status(len(entries))
             return
 
-        # 完整重建（数据变化或有搜索词时）
-        self.list_widget.setUpdatesEnabled(False)
-        self.list_widget.clear()
-        self._item_map.clear()
+        if not kw and self._try_incremental_sync(entries, new_ids):
+            self._schedule_visible_thumbnails()
+            return
 
-        for entry in entries:
-            item = QListWidgetItem()
-            widget = EntryItemWidget(entry)
-            item.setSizeHint(QSize(self.list_widget.width() - 10,
-                                   140 if entry.type == "image" else 95))
-            item.setData(Qt.UserRole, entry)
-            self.list_widget.addItem(item)
-            self.list_widget.setItemWidget(item, widget)
-            self._item_map[entry.id] = (item, widget)
-
-            if entry.type == "image" and PIL_AVAILABLE:
-                loader = ThumbnailLoader(entry.id, entry, self._thumb_signals)
-                self._thumb_pool.start(loader)
-
-        self.list_widget.setUpdatesEnabled(True)
-        self._current_ids = new_ids
-
-        count = len(entries)
-        mode_str = "普通历史" if self._mode == "history" else "永久保存"
-        self.status_label.setText(f"{mode_str}: {count} 条")
-
-        if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
+        self._full_rebuild_list(entries, new_ids)
 
     def _on_thumbnail_ready(self, entry_id: str, pixmap: QPixmap):
+        self._thumb_loading.discard(entry_id)
+        self._thumb_loaded.add(entry_id)
         pair = self._item_map.get(entry_id)
         if pair:
             _, widget = pair
@@ -888,10 +992,9 @@ class MainWindow(QMainWindow):
         self._refresh_list()
 
     def refresh_if_dirty(self):
-        """仅在数据有变化时才刷新"""
+        """仅在数据有变化时才刷新（增量优先）"""
         if self.history.consume_dirty():
-            self._current_ids = []
-            self._refresh_list()
+            self._do_refresh()
 
     def _on_item_clicked(self, item: QListWidgetItem):
         entry = item.data(Qt.UserRole)
@@ -1012,6 +1115,9 @@ class MainWindow(QMainWindow):
                     entry = current_item.data(Qt.UserRole)
                     self._paste_entry(entry, as_plain_text=(event.modifiers() == Qt.ShiftModifier))
                 return True
+            elif key == Qt.Key_G and event.modifiers() == Qt.ControlModifier:
+                self.toggle_mode()
+                return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
@@ -1055,7 +1161,6 @@ class ClipboardManagerApp:
 
         self.hotkey_mgr = GlobalHotkeyManager()
         self.hotkey_mgr.signal_alt_v.connect(self._toggle_window)
-        self.hotkey_mgr.signal_ctrl_g.connect(self._toggle_mode)
         self.hotkey_mgr.start_listening()
 
     def _setup_tray(self):
@@ -1106,23 +1211,25 @@ class ClipboardManagerApp:
         if self.window.isVisible():
             self.window.hide()
         else:
-            # ★ 关键：先定位到鼠标，再 show，用户几乎感觉不到延迟
-            self.window._position_near_cursor()
-            # 若数据没有变化，不重建列表，直接显示
-            self.window.refresh_if_dirty()
-            self.window.show()
-            self.window.raise_()
-            self.window.activateWindow()
-            self.window.search_box.clear()
-            self.window.search_box.setFocus()
+            win = self.window
+            had_search = bool(win._search_keyword)
+            win._position_near_cursor()
+            win.search_box.blockSignals(True)
+            win.search_box.clear()
+            win.search_box.blockSignals(False)
+            win._search_keyword = ""
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            win.search_box.setFocus()
 
-    def _toggle_mode(self):
-        if not self.window.isVisible():
-            self.window._position_near_cursor()
-            self.window.show()
-            self.window.raise_()
-            self.window.activateWindow()
-        self.window.toggle_mode()
+            def _deferred_refresh():
+                if had_search:
+                    win._do_refresh()
+                else:
+                    win.refresh_if_dirty()
+
+            QTimer.singleShot(0, _deferred_refresh)
 
     def _on_new_clip(self, entry: ClipEntry):
         self.history.add(entry)
