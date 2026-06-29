@@ -1,1 +1,11 @@
-New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+-- 1. 添加新列
+ALTER TABLE 表名 
+ADD 列名 数据类型 [NULL | NOT NULL] [DEFAULT 默认值];
+
+-- 2. 为新列添加注释（调用系统存储过程）
+EXEC sp_addextendedproperty 
+    @name = N'MS_Description',      -- 属性名称，SQL Server 默认用 MS_Description 表示注释
+    @value = N'你的列注释内容',       -- 注释内容
+    @level0type = N'SCHEMA',   @level0name = N'dbo',        -- 架构名（通常是 dbo）
+    @level1type = N'TABLE',    @level1name = N'表名',       -- 表名
+    @level2type = N'COLUMN',   @level2name = N'列名';       -- 列名
