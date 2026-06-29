@@ -21,8 +21,10 @@ Win11 截图标注工具 (2026 UI 美化修正版 v5)
     优化:
     1. 工具栏独立弹出，自动吸附在图片右下角，不参与图片缩放
     2. 边缘/角落缩放感应区扩大至 16px，更容易点中
+    3. 热键先弹出暗色遮罩框选，松手后按区域后台截取，降低内存峰值与主线程阻塞
 """
 
+import gc
 import io
 import os
 import threading
@@ -77,45 +79,79 @@ TOOLBAR_HEIGHT = 46
 # 【修改】大幅增大边缘感应区域（从 8 像素提升至 16 像素），让鼠标极易点中
 RESIZE_MARGIN = 16
 
+_mss = None
+_virtual_bounds = None
+_primary_monitor = None
+_capturing = False
+_selecting = False
 
-def capture_screen():
-    with mss.MSS() as sct:
-        monitor = sct.monitors[0]
-        shot = sct.grab(monitor)
-        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+def get_mss():
+    global _mss
+    if _mss is None:
+        _mss = mss.mss()
+    return _mss
+
+
+def _refresh_monitor_cache():
+    global _virtual_bounds, _primary_monitor
+    sct = get_mss()
+    v = sct.monitors[0]
+    _virtual_bounds = (v["left"], v["top"], v["width"], v["height"])
+    p = sct.monitors[1]
+    _primary_monitor = (p["left"], p["top"], p["width"], p["height"])
+
+
+def get_virtual_screen_bounds():
+    if _virtual_bounds is None:
+        _refresh_monitor_cache()
+    return _virtual_bounds
 
 
 def get_primary_monitor():
-    with mss.MSS() as sct:
-        m = sct.monitors[1]
-        return m["left"], m["top"], m["width"], m["height"]
+    if _primary_monitor is None:
+        _refresh_monitor_cache()
+    return _primary_monitor
+
+
+def capture_screen():
+    """整屏截取（备用/调试，热键路径不再使用）"""
+    v = get_mss().monitors[0]
+    shot = get_mss().grab(v)
+    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+
+def capture_region(left, top, width, height):
+    shot = get_mss().grab({"left": left, "top": top, "width": width, "height": height})
+    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
 
 class RegionSelector:
-    """全屏暗化并让用户框选截图区域"""
+    """全屏暗色遮罩框选，松手后再按区域截取（不预加载整屏图）"""
 
-    def __init__(self, root, image, on_done):
+    def __init__(self, root, screen_bounds, on_done):
         self.root = root
-        self.image = image
+        self.screen_left, self.screen_top, self.screen_w, self.screen_h = screen_bounds
         self.on_done = on_done
         self.start_x = self.start_y = self.rect = None
 
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.geometry(f"{image.width}x{image.height}+0+0")
+        self.win.attributes("-alpha", 0.35)
+        self.win.configure(bg="#000000")
+        self.win.geometry(
+            f"{self.screen_w}x{self.screen_h}+{self.screen_left}+{self.screen_top}"
+        )
 
         self.canvas = tk.Canvas(
-            self.win, width=image.width, height=image.height,
-            cursor="cross", highlightthickness=0
+            self.win, width=self.screen_w, height=self.screen_h,
+            cursor="cross", highlightthickness=0, bg="#000000"
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        self.photo = ImageTk.PhotoImage(image)
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
-
         self.canvas.create_text(
-            image.width // 2, 40,
+            self.screen_w // 2, 40,
             text="✦ 拖动鼠标选择区域  ·  右键取消 ✦",
             fill="#FFFFFF", font=(THEME["font_bold"][0], 14, "bold")
         )
@@ -148,8 +184,11 @@ class RegionSelector:
 
         self.win.destroy()
 
-        if x2 - x1 > 5 and y2 - y1 > 5:
-            self.on_done(self.image.crop((x1, y1, x2, y2)))
+        w, h = x2 - x1, y2 - y1
+        if w > 5 and h > 5:
+            abs_left = self.screen_left + x1
+            abs_top = self.screen_top + y1
+            self.on_done((abs_left, abs_top, w, h))
         else:
             self.on_done(None)
 
@@ -365,15 +404,21 @@ class AnnotationWindow:
         self.canvas.focus_set()
 
     def destroy_all(self):
-        """同时关闭主窗口和悬浮工具栏"""
+        """同时关闭主窗口和悬浮工具栏，并释放图像内存"""
+        self.original_image = None
+        self.image = None
+        self.photo = None
+        self.annotations.clear()
+        self.undo_stack.clear()
         try:
             self.tb_win.destroy()
-        except:
+        except Exception:
             pass
         try:
             self.root.destroy()
-        except:
+        except Exception:
             pass
+        gc.collect()
 
     def reposition_toolbar(self):
         """【核心改动】动态计算并将工具栏摆放在主窗口的右下角（外部挂靠）"""
@@ -764,18 +809,64 @@ def open_annotation(root, img):
     AnnotationWindow(win, img)
 
 
+def _set_capturing(value):
+    global _capturing
+    _capturing = value
+
+
+def _set_selecting(value):
+    global _selecting
+    _selecting = value
+
+
+def _open_annotation_safe(root, img):
+    global _capturing
+    _capturing = False
+    if img is not None:
+        open_annotation(root, img)
+
+
+def _on_region_done(root, bbox):
+    global _capturing, _selecting
+    _set_selecting(False)
+
+    if not bbox:
+        return
+
+    _set_capturing(True)
+    left, top, width, height = bbox
+
+    def worker():
+        try:
+            img = capture_region(left, top, width, height)
+            root.after(0, lambda: _open_annotation_safe(root, img))
+        except Exception as e:
+            root.after(0, lambda: print("截图失败:", e))
+            root.after(0, lambda: _set_capturing(False))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def start_capture(root):
+    global _capturing, _selecting
+    if _capturing or _selecting:
+        return
+
     try:
-        full_img = capture_screen()
-        RegionSelector(root, full_img,
-                       lambda cropped: cropped and open_annotation(root, cropped))
+        _refresh_monitor_cache()
+        bounds = get_virtual_screen_bounds()
+        _set_selecting(True)
+        RegionSelector(root, bounds, lambda bbox: _on_region_done(root, bbox))
     except Exception as e:
+        _set_selecting(False)
         print("截图失败:", e)
 
 
 def main():
     root = tk.Tk()
     root.withdraw()
+
+    _refresh_monitor_cache()
 
     print("====================================")
     print("  Win11 极简截图工具已完美激活")
