@@ -5,7 +5,7 @@
 Win11 截图标注工具 (2026 UI 美化修正版 v5)
 
 快捷键:
-    Ctrl + Shift + Alt + X   截图
+    F9                       截图
 
 功能:
     Ctrl+C     复制图片
@@ -18,12 +18,12 @@ Win11 截图标注工具 (2026 UI 美化修正版 v5)
     左键拖图片 拖动窗口（未选工具时）/ 画图（选工具后）
     再次点击工具按钮  取消选中，回到拖窗模式
     文字工具   单击画布放置输入框，Enter 确认，Esc 取消（输入框大号显示，滚轮调最终字号）
-    系统托盘   右键可立即截图或退出程序
+    系统托盘   右键可立即截图或退出程序；启动时气泡提示
 
     优化:
     1. 工具栏独立弹出，自动吸附在图片右下角，不参与图片缩放
     2. 边缘/角落缩放感应区扩大至 16px，更容易点中
-    3. 热键先弹出暗色遮罩框选，松手后按区域后台截取，降低内存峰值与主线程阻塞
+    3. F9 后立即冻结全屏再框选，框选期间画面静止，裁剪来自冻结图
 """
 
 import gc
@@ -46,7 +46,7 @@ from PIL import ImageFont
 from pynput import keyboard
 import win32clipboard
 
-HOTKEY = "<ctrl>+<shift>+<alt>+x"
+HOTKEY = "<f9>"
 
 TOOL_ARROW = "arrow"
 TOOL_RECT = "rect"
@@ -139,18 +139,20 @@ def capture_region(left, top, width, height):
 
 
 class RegionSelector:
-    """全屏暗色遮罩框选，松手后再按区域截取（不预加载整屏图）"""
+    """全屏冻结画面框选，从静态图中裁剪选区"""
 
-    def __init__(self, root, screen_bounds, on_done):
+    def __init__(self, root, screen_bounds, frozen_image, on_done):
         self.root = root
         self.screen_left, self.screen_top, self.screen_w, self.screen_h = screen_bounds
+        self.frozen_image = frozen_image
         self.on_done = on_done
         self.start_x = self.start_y = self.rect = None
+        self.dim_items = []
+        self._hint_text = None
 
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", 0.35)
         self.win.configure(bg="#000000")
         self.win.geometry(
             f"{self.screen_w}x{self.screen_h}+{self.screen_left}+{self.screen_top}"
@@ -162,7 +164,10 @@ class RegionSelector:
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas.create_text(
+        self._bg_photo = ImageTk.PhotoImage(self.frozen_image)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self._bg_photo)
+
+        self._hint_text = self.canvas.create_text(
             self.screen_w // 2, 40,
             text="✦ 拖动鼠标选择区域  ·  右键取消 ✦",
             fill="#FFFFFF", font=(THEME["font_bold"][0], 14, "bold")
@@ -173,7 +178,33 @@ class RegionSelector:
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.win.bind("<Button-3>", lambda e: self.cancel())
 
+    def _clear_dim(self):
+        for item in self.dim_items:
+            self.canvas.delete(item)
+        self.dim_items.clear()
+
+    def _update_dim(self, x1, y1, x2, y2):
+        self._clear_dim()
+        sw, sh = self.screen_w, self.screen_h
+        stipple = "gray50"
+        panels = [
+            (0, 0, sw, y1),
+            (0, y2, sw, sh),
+            (0, y1, x1, y2),
+            (x2, y1, sw, y2),
+        ]
+        for px1, py1, px2, py2 in panels:
+            if px2 > px1 and py2 > py1:
+                self.dim_items.append(self.canvas.create_rectangle(
+                    px1, py1, px2, py2, fill="black", stipple=stipple, outline=""
+                ))
+        if self.rect:
+            self.canvas.tag_raise(self.rect)
+
     def on_press(self, event):
+        if self._hint_text:
+            self.canvas.delete(self._hint_text)
+            self._hint_text = None
         self.start_x, self.start_y = event.x, event.y
         self.rect = self.canvas.create_rectangle(
             event.x, event.y, event.x, event.y,
@@ -183,6 +214,11 @@ class RegionSelector:
     def on_drag(self, event):
         if self.rect and self.start_x is not None and self.start_y is not None:
             self.canvas.coords(self.rect, self.start_x, self.start_y, event.x, event.y)
+            x1 = min(self.start_x, event.x)
+            y1 = min(self.start_y, event.y)
+            x2 = max(self.start_x, event.x)
+            y2 = max(self.start_y, event.y)
+            self._update_dim(x1, y1, x2, y2)
 
     def on_release(self, event):
         if self.start_x is None or self.start_y is None or event.x is None or event.y is None:
@@ -194,13 +230,15 @@ class RegionSelector:
         x2 = max(self.start_x, event.x)
         y2 = max(self.start_y, event.y)
 
+        w, h = x2 - x1, y2 - y1
         self.win.destroy()
 
-        w, h = x2 - x1, y2 - y1
         if w > 5 and h > 5:
-            abs_left = self.screen_left + x1
-            abs_top = self.screen_top + y1
-            self.on_done((abs_left, abs_top, w, h))
+            self.on_done((
+                self.frozen_image.crop((x1, y1, x2, y2)),
+                self.screen_left + x1,
+                self.screen_top + y1,
+            ))
         else:
             self.on_done(None)
 
@@ -258,7 +296,7 @@ class AnnotationWindow:
     _resize_win_x = _resize_win_y = 0
     _resize_win_w = _resize_win_h = 0
 
-    def __init__(self, root, image):
+    def __init__(self, root, image, origin_x=None, origin_y=None):
         self.root = root
         self.original_image = image  # 始终保留最原始的分辨率参考
         self.image = image.copy()
@@ -304,12 +342,15 @@ class AnnotationWindow:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
 
-        # 设置主窗口初始大小与几何位置
+        # 设置主窗口初始大小与几何位置（默认在框选原位）
         win_w = self.image.width
         win_h = self.image.height
-        ml, mt, mw, mh = get_primary_monitor()
-        sx = ml + (mw - win_w) // 2
-        sy = mt + (mh - win_h) // 2
+        if origin_x is not None and origin_y is not None:
+            sx, sy = origin_x, origin_y
+        else:
+            ml, mt, mw, mh = get_primary_monitor()
+            sx = ml + (mw - win_w) // 2
+            sy = mt + (mh - win_h) // 2
         root.geometry(f"{win_w}x{win_h}+{sx}+{sy}")
 
         # ====================
@@ -981,9 +1022,9 @@ class AnnotationWindow:
             self.show_toast(f"✕ 保存失败: {e}", success=False)
 
 
-def open_annotation(root, img):
+def open_annotation(root, img, origin_x=None, origin_y=None):
     win = tk.Toplevel(root)
-    AnnotationWindow(win, img)
+    AnnotationWindow(win, img, origin_x, origin_y)
 
 
 def _set_capturing(value):
@@ -996,32 +1037,12 @@ def _set_selecting(value):
     _selecting = value
 
 
-def _open_annotation_safe(root, img):
-    global _capturing
-    _capturing = False
-    if img is not None:
-        open_annotation(root, img)
-
-
-def _on_region_done(root, bbox):
-    global _capturing, _selecting
+def _on_region_done(root, result):
     _set_selecting(False)
-
-    if not bbox:
+    if result is None:
         return
-
-    _set_capturing(True)
-    left, top, width, height = bbox
-
-    def worker():
-        try:
-            img = capture_region(left, top, width, height)
-            root.after(0, lambda: _open_annotation_safe(root, img))
-        except Exception as e:
-            root.after(0, lambda: print("截图失败:", e))
-            root.after(0, lambda: _set_capturing(False))
-
-    threading.Thread(target=worker, daemon=True).start()
+    img, origin_x, origin_y = result
+    open_annotation(root, img, origin_x, origin_y)
 
 
 def start_capture(root):
@@ -1032,8 +1053,10 @@ def start_capture(root):
     try:
         _refresh_monitor_cache()
         bounds = get_virtual_screen_bounds()
+        left, top, w, h = bounds
+        frozen = capture_region(left, top, w, h)
         _set_selecting(True)
-        RegionSelector(root, bounds, lambda bbox: _on_region_done(root, bbox))
+        RegionSelector(root, bounds, frozen, lambda image: _on_region_done(root, image))
     except Exception as e:
         _set_selecting(False)
         print("截图失败:", e)
@@ -1078,10 +1101,18 @@ def setup_tray(root):
     _tray_icon = pystray.Icon(
         "screenshot_tool",
         _create_tray_image(),
-        "截图工具\nCtrl+Shift+Alt+X 截图",
+        "截图工具\nF9 截图",
         menu,
     )
-    threading.Thread(target=_tray_icon.run, daemon=True).start()
+
+    def _on_tray_ready(icon):
+        icon.visible = True
+        icon.notify("已启动！按 F9 截图", "截图工具")
+
+    threading.Thread(
+        target=lambda: _tray_icon.run(_on_tray_ready),
+        daemon=True,
+    ).start()
 
 
 def main():
@@ -1092,7 +1123,7 @@ def main():
 
     print("====================================")
     print("  Win11 极简截图工具已完美激活")
-    print("  快捷键: Ctrl + Shift + Alt + X")
+    print("  快捷键: F9")
     print("====================================")
 
     def hotkey_thread():
