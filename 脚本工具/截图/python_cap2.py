@@ -12,11 +12,13 @@ Win11 截图标注工具 (2026 UI 美化修正版 v5)
     Ctrl+S     保存桌面
     Ctrl+Z     撤销一步
     ESC        关闭窗口
-    滚轮       调整粗细
+    滚轮       调整粗细/字号
     双击图片   关闭窗口
     拖动工具栏 移动窗口
     左键拖图片 拖动窗口（未选工具时）/ 画图（选工具后）
     再次点击工具按钮  取消选中，回到拖窗模式
+    文字工具   单击画布放置输入框，Enter 确认，Esc 取消（输入框大号显示，滚轮调最终字号）
+    系统托盘   右键可立即截图或退出程序
 
     优化:
     1. 工具栏独立弹出，自动吸附在图片右下角，不参与图片缩放
@@ -27,16 +29,19 @@ Win11 截图标注工具 (2026 UI 美化修正版 v5)
 import gc
 import io
 import os
+import sys
 import threading
 import math
 from datetime import datetime
 
 import mss
 import tkinter as tk
+import pystray
 
 from PIL import Image
 from PIL import ImageTk
 from PIL import ImageDraw
+from PIL import ImageFont
 
 from pynput import keyboard
 import win32clipboard
@@ -47,6 +52,10 @@ TOOL_ARROW = "arrow"
 TOOL_RECT = "rect"
 TOOL_CIRCLE = "circle"
 TOOL_BRUSH = "brush"
+TOOL_TEXT = "text"
+
+TEXT_FONT_FAMILY = "Microsoft YaHei"
+TEXT_FONT_PATH = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc")
 
 # 2026 现代莫兰迪/流体色系：高级低饱和度
 COLORS = [
@@ -58,8 +67,8 @@ COLORS = [
     "#2B2D42"  # 深空灰
 ]
 
-MY_FONT = ("Consolas", 11)
-MY_FONT_BOLD = ("Consolas", 11, "bold")
+MY_FONT = ("Microsoft YaHei", 12)
+MY_FONT_BOLD = ("Microsoft YaHei", 12, "bold")
 
 # 现代极简风格主题配置
 THEME = {
@@ -73,8 +82,10 @@ THEME = {
     "font_bold": MY_FONT_BOLD
 }
 
-TOOLBAR_MIN_WIDTH = 1000
-TOOLBAR_HEIGHT = 46
+TOOLBAR_HEIGHT = 52
+TOOLBAR_MIN_WIDTH = 480
+TEXT_INPUT_MIN_FONT = 16
+TEXT_INPUT_WIDTH = 24
 
 # 【修改】大幅增大边缘感应区域（从 8 像素提升至 16 像素），让鼠标极易点中
 RESIZE_MARGIN = 16
@@ -84,6 +95,7 @@ _virtual_bounds = None
 _primary_monitor = None
 _capturing = False
 _selecting = False
+_tray_icon = None
 
 
 def get_mss():
@@ -268,6 +280,12 @@ class AnnotationWindow:
         self._drag_ox = self._drag_oy = 0
         self._press_rx = self._press_ry = 0
 
+        self._text_entry_win = None
+        self._text_entry = None
+        self._text_canvas_pos = None
+        self._text_orig_pos = None
+        self._pil_font_cache = {}
+
         # ====================
         # 主窗口样式（仅包含图片画布）
         # ====================
@@ -302,23 +320,23 @@ class AnnotationWindow:
         self.tb_win.attributes("-topmost", True)
         self.tb_win.configure(bg=THEME["bg_toolbar"])
 
-        toolbar = tk.Frame(self.tb_win, bg=THEME["bg_toolbar"], height=TOOLBAR_HEIGHT,
+        self.toolbar = tk.Frame(self.tb_win, bg=THEME["bg_toolbar"], height=TOOLBAR_HEIGHT,
                            bd=0, highlightthickness=1, highlightbackground=THEME["border"])
-        toolbar.pack(fill=tk.BOTH, expand=True)
-        toolbar.pack_propagate(False)
+        self.toolbar.pack(fill=tk.BOTH, expand=True)
+        self.toolbar.pack_propagate(False)
 
         # 拖拽把手
-        drag_handle = tk.Label(toolbar, text=" ☰ ", bg=THEME["bg_toolbar"], fg="#A0A0A0", font=THEME["font"])
+        drag_handle = tk.Label(self.toolbar, text=" ☰ ", bg=THEME["bg_toolbar"], fg="#A0A0A0", font=THEME["font"])
         drag_handle.pack(side=tk.LEFT, padx=(8, 2))
         drag_handle.bind("<ButtonPress-1>", self._tb_press)
         drag_handle.bind("<B1-Motion>", self._tb_drag)
-        toolbar.bind("<ButtonPress-1>", self._tb_press)
-        toolbar.bind("<B1-Motion>", self._tb_drag)
+        self.toolbar.bind("<ButtonPress-1>", self._tb_press)
+        self.toolbar.bind("<B1-Motion>", self._tb_drag)
 
         # 颜色盘
         self.color_boxes = {}
         for c in COLORS:
-            box_container = tk.Frame(toolbar, bg=THEME["bg_toolbar"], width=26, height=26)
+            box_container = tk.Frame(self.toolbar, bg=THEME["bg_toolbar"], width=26, height=26)
             box_container.pack(side=tk.LEFT, padx=3)
             box_container.pack_propagate(False)
 
@@ -327,7 +345,7 @@ class AnnotationWindow:
             self.color_boxes[c] = box_container
             box.bind("<Button-1>", lambda e, col=c: self.set_color(col))
 
-        self.create_sep(toolbar)
+        self.create_sep(self.toolbar)
 
         # 工具按钮
         self.tool_buttons = {}
@@ -335,14 +353,15 @@ class AnnotationWindow:
             (TOOL_BRUSH, " ✎ 画笔 "),
             (TOOL_ARROW, " ↗ 箭头 "),
             (TOOL_RECT, " ▱ 矩形 "),
-            (TOOL_CIRCLE, " ◯ 圆形 ")
+            (TOOL_CIRCLE, " ◯ 圆形 "),
+            (TOOL_TEXT, " T 文字 "),
         ]
 
         for name, label in tool_configs:
             btn = tk.Button(
-                toolbar, text=label, bg=THEME["bg_toolbar"], fg=THEME["text_main"],
+                self.toolbar, text=label, bg=THEME["bg_toolbar"], fg=THEME["text_main"],
                 font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2",
-                padx=8, pady=4,
+                padx=10, pady=6,
                 activebackground=THEME["border"], activeforeground=THEME["text_main"]
             )
             btn.pack(side=tk.LEFT, padx=2)
@@ -351,33 +370,33 @@ class AnnotationWindow:
             btn.bind("<Leave>", lambda e, b=btn, n=name: self._on_btn_hover(b, n, False))
             self.tool_buttons[name] = btn
 
-        self.create_sep(toolbar)
+        self.create_sep(self.toolbar)
 
-        tk.Label(toolbar, text="粗细", bg=THEME["bg_toolbar"], fg="#777777", font=THEME["font"]).pack(side=tk.LEFT,
-                                                                                                      padx=(4, 4))
-        self.size_label = tk.Label(toolbar, text=str(self.draw_size), bg=THEME["bg_main"], fg=THEME["text_main"],
+        self.size_title_label = tk.Label(
+            self.toolbar, text="粗细", bg=THEME["bg_toolbar"], fg="#777777", font=THEME["font"]
+        )
+        self.size_title_label.pack(side=tk.LEFT, padx=(4, 4))
+        self.size_label = tk.Label(self.toolbar, text=str(self.draw_size), bg=THEME["bg_main"], fg=THEME["text_main"],
                                    font=THEME["font_bold"], width=3, height=1, bd=0)
         self.size_label.pack(side=tk.LEFT, padx=2)
 
-        self.top_btn = tk.Button(toolbar, text=" 固 定 ", bg=THEME["bg_toolbar"], fg="#8E44AD",
-                                 font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        self.top_btn = tk.Button(self.toolbar, text=" 固 定 ", bg=THEME["bg_toolbar"], fg="#8E44AD",
+                                 font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=10, pady=6)
         self.top_btn.pack(side=tk.RIGHT, padx=4)
         self.top_btn.configure(command=self.toggle_topmost)
 
-        btn_clear = tk.Button(toolbar, text=" 清空 ", bg=THEME["bg_toolbar"], fg="#E74C3C",
-                              font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        btn_clear = tk.Button(self.toolbar, text=" 清空 ", bg=THEME["bg_toolbar"], fg="#E74C3C",
+                              font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=10, pady=6)
         btn_clear.pack(side=tk.RIGHT, padx=2)
         btn_clear.configure(command=self.clear)
 
-        btn_undo = tk.Button(toolbar, text=" 撤销 ", bg=THEME["bg_toolbar"], fg="#D35400",
-                             font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=6, pady=4)
+        btn_undo = tk.Button(self.toolbar, text=" 撤销 ", bg=THEME["bg_toolbar"], fg="#D35400",
+                             font=THEME["font_bold"], relief=tk.FLAT, bd=0, cursor="hand2", padx=10, pady=6)
         btn_undo.pack(side=tk.RIGHT, padx=2)
         btn_undo.configure(command=self.undo)
 
         self.refresh_color_selector()
 
-        # 配置独立工具栏的几何形状
-        self.tb_win.geometry(f"{TOOLBAR_MIN_WIDTH}x{TOOLBAR_HEIGHT}")
         root.update_idletasks()
         self.reposition_toolbar()  # 首次定位右下角
 
@@ -405,6 +424,7 @@ class AnnotationWindow:
 
     def destroy_all(self):
         """同时关闭主窗口和悬浮工具栏，并释放图像内存"""
+        self._cancel_text_input()
         self.original_image = None
         self.image = None
         self.photo = None
@@ -420,21 +440,29 @@ class AnnotationWindow:
             pass
         gc.collect()
 
+    def _measure_toolbar_size(self):
+        self.toolbar.pack_propagate(True)
+        self.toolbar.update_idletasks()
+        w = max(self.toolbar.winfo_reqwidth() + 16, TOOLBAR_MIN_WIDTH)
+        h = TOOLBAR_HEIGHT
+        self.toolbar.pack_propagate(False)
+        self.toolbar.configure(width=w, height=h)
+        return w, h
+
     def reposition_toolbar(self):
-        """【核心改动】动态计算并将工具栏摆放在主窗口的右下角（外部挂靠）"""
+        """动态计算并将工具栏摆放在主窗口的右下角（外部挂靠）"""
         if not self.root.winfo_exists() or not self.tb_win.winfo_exists():
             return
-        # 获取图片窗口目前的真实全局坐标及宽高
         rx = self.root.winfo_x()
         ry = self.root.winfo_y()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
 
-        # 将工具栏摆在图片右下角（贴合边缘）
-        tbx = rx + rw - TOOLBAR_MIN_WIDTH
-        tby = ry + rh + 4  # 下留 4px 呼吸间隙，若想完全无缝可设为 ry + rh
+        tw, th = self._measure_toolbar_size()
+        tbx = rx + max(0, rw - tw)
+        tby = ry + rh + 4
 
-        self.tb_win.geometry(f"{TOOLBAR_MIN_WIDTH}x{TOOLBAR_HEIGHT}+{tbx}+{tby}")
+        self.tb_win.geometry(f"{tw}x{th}+{tbx}+{tby}")
 
     # ──────────────────────────────────────────────
     #  resize 工具方法
@@ -474,6 +502,8 @@ class AnnotationWindow:
         edge = self._get_edge(event.x, event.y)
         if edge:
             self.canvas.configure(cursor=self._EDGE_CURSOR[edge])
+        elif self.tool == TOOL_TEXT:
+            self.canvas.configure(cursor="xterm")
         else:
             self.canvas.configure(cursor="fleur" if self.tool is None else "tcross")
         self._resize_edge = edge
@@ -542,6 +572,17 @@ class AnnotationWindow:
                         new_undo_map[old_id] = nid
                         new_items.append(nid)
                 ann['items'] = new_items
+            elif ann['type'] == 'text':
+                ox, oy = ann['orig_coords']
+                fs = max(8, int(ann['size'] * min(sx, sy)))
+                nid = self.canvas.create_text(
+                    ox * sx, oy * sy, text=ann['text'], fill=ann['color'],
+                    font=(TEXT_FONT_FAMILY, fs), anchor=tk.NW
+                )
+                old_id = ann.get('_canvas_id')
+                if old_id:
+                    new_undo_map[old_id] = nid
+                ann['_canvas_id'] = nid
             else:
                 orig_c = ann['orig_coords']
                 if len(orig_c) == 4:
@@ -584,6 +625,9 @@ class AnnotationWindow:
         if self.tool is None:
             return
 
+        if self.tool == TOOL_TEXT:
+            return
+
         self.start_x, self.start_y = event.x, event.y
         if self.tool == TOOL_BRUSH:
             self.current_brush_items = []
@@ -601,6 +645,9 @@ class AnnotationWindow:
             x = self._drag_ox + (event.x_root - self._press_rx)
             y = self._drag_oy + (event.y_root - self._press_ry)
             self.root.geometry(f"+{x}+{y}")
+            return
+
+        if self.tool == TOOL_TEXT:
             return
 
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
@@ -628,6 +675,10 @@ class AnnotationWindow:
             return
 
         if self.tool is None:
+            return
+
+        if self.tool == TOOL_TEXT:
+            self._start_text_input(event.x, event.y)
             return
 
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
@@ -662,7 +713,7 @@ class AnnotationWindow:
     # ──────────────────────────────────────────────
 
     def create_sep(self, parent):
-        sep = tk.Frame(parent, bg=THEME["border"], width=1, height=20)
+        sep = tk.Frame(parent, bg=THEME["border"], width=1, height=24)
         sep.pack(side=tk.LEFT, padx=8)
 
     def _on_btn_hover(self, btn, name, is_enter):
@@ -682,7 +733,15 @@ class AnnotationWindow:
         self.tb_win.geometry(f"+{x}+{y}")
 
     def toggle_tool(self, tool):
+        if self.tool == TOOL_TEXT and self._text_entry_win:
+            if self._text_entry and self._text_entry.get().strip():
+                self._commit_text_input()
+            else:
+                self._cancel_text_input()
         self.tool = None if self.tool == tool else tool
+        if self.tool == TOOL_TEXT and self.draw_size < 12:
+            self.draw_size = 12
+            self.size_label.config(text=str(self.draw_size))
         self._refresh_tool_buttons()
 
     def _refresh_tool_buttons(self):
@@ -691,6 +750,105 @@ class AnnotationWindow:
                 btn.configure(bg=THEME["accent"], fg="white")
             else:
                 btn.configure(bg=THEME["bg_toolbar"], fg=THEME["text_main"])
+        self.size_title_label.config(text="字号" if self.tool == TOOL_TEXT else "粗细")
+
+    def _start_text_input(self, x, y):
+        if self._text_entry_win:
+            self._commit_text_input()
+
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        orig_w, orig_h = self.original_image.width, self.original_image.height
+        sx, sy = orig_w / cw, orig_h / ch
+        self._text_canvas_pos = (x, y)
+        self._text_orig_pos = (x * sx, y * sy)
+
+        self._text_entry_win = tk.Toplevel(self.root)
+        self._text_entry_win.overrideredirect(True)
+        self._text_entry_win.attributes("-topmost", True)
+        self._text_entry_win.configure(bg=THEME["bg_main"])
+
+        rx = self.root.winfo_rootx() + x
+        ry = self.root.winfo_rooty() + y
+        self._text_entry_win.geometry(f"+{rx}+{ry}")
+
+        entry_font_size = max(TEXT_INPUT_MIN_FONT, self.draw_size)
+        self._text_entry = tk.Entry(
+            self._text_entry_win,
+            fg=self.color,
+            bg="#FFFFFF",
+            font=(TEXT_FONT_FAMILY, entry_font_size),
+            width=TEXT_INPUT_WIDTH,
+            insertwidth=2,
+            bd=1,
+            relief=tk.SOLID,
+            highlightthickness=1,
+            highlightcolor=THEME["accent"],
+            highlightbackground=THEME["border"],
+        )
+        self._text_entry.pack(ipady=6, ipadx=4, padx=1, pady=1)
+        self._text_entry.bind("<Return>", self._commit_text_input)
+        self._text_entry.bind("<Escape>", self._cancel_text_input)
+        self._text_entry.bind("<FocusOut>", self._on_text_focus_out)
+        self._text_entry.focus_set()
+
+    def _on_text_focus_out(self, event=None):
+        self.root.after_idle(self._handle_text_focus_out)
+
+    def _handle_text_focus_out(self):
+        if not self._text_entry or not self._text_entry_win:
+            return
+        try:
+            if not self._text_entry_win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        focused = self.root.focus_get()
+        if focused == self._text_entry:
+            return
+        content = self._text_entry.get().strip()
+        if content:
+            self._commit_text_input()
+        else:
+            self._cancel_text_input()
+
+    def _commit_text_input(self, event=None):
+        if not self._text_entry:
+            return
+
+        content = self._text_entry.get().strip()
+        x, y = self._text_canvas_pos
+        orig_x, orig_y = self._text_orig_pos
+        color = self.color
+        size = self.draw_size
+        self._cancel_text_input()
+
+        if not content:
+            return
+
+        item = self.canvas.create_text(
+            x, y, text=content, fill=color,
+            font=(TEXT_FONT_FAMILY, size), anchor=tk.NW
+        )
+        self.undo_stack.append([item])
+        self.annotations.append({
+            'type': 'text',
+            'text': content,
+            'orig_coords': [orig_x, orig_y],
+            'color': color,
+            'size': size,
+            '_canvas_id': item,
+        })
+
+    def _cancel_text_input(self, event=None):
+        self._text_entry = None
+        self._text_canvas_pos = None
+        self._text_orig_pos = None
+        if self._text_entry_win:
+            try:
+                self._text_entry_win.destroy()
+            except Exception:
+                pass
+            self._text_entry_win = None
 
     def _create_shape(self, x, y):
         if self.tool == TOOL_ARROW:
@@ -715,6 +873,9 @@ class AnnotationWindow:
     def on_scroll(self, event):
         self.draw_size = max(1, min(30, self.draw_size + (1 if event.delta > 0 else -1)))
         self.size_label.config(text=str(self.draw_size))
+        if self._text_entry:
+            entry_font_size = max(TEXT_INPUT_MIN_FONT, self.draw_size)
+            self._text_entry.configure(font=(TEXT_FONT_FAMILY, entry_font_size))
 
     def undo(self):
         if not self.undo_stack: return
@@ -723,6 +884,7 @@ class AnnotationWindow:
         if self.annotations: self.annotations.pop()
 
     def clear(self):
+        self._cancel_text_input()
         while self.undo_stack:
             for item in self.undo_stack.pop():
                 self.canvas.delete(item)
@@ -760,7 +922,22 @@ class AnnotationWindow:
                 s, e = (c[0], c[1]), (c[2], c[3])
                 draw.line([s, e], fill=ann['color'], width=lw)
                 self._draw_arrow_head(draw, s, e, ann['color'], lw)
+            elif ann['type'] == 'text':
+                x, y = ann['orig_coords']
+                draw.text(
+                    (x, y), ann['text'], fill=ann['color'],
+                    font=self._get_pil_font(int(ann['size']))
+                )
         return result
+
+    def _get_pil_font(self, size):
+        size = max(8, int(size))
+        if size not in self._pil_font_cache:
+            try:
+                self._pil_font_cache[size] = ImageFont.truetype(TEXT_FONT_PATH, size)
+            except OSError:
+                self._pil_font_cache[size] = ImageFont.load_default()
+        return self._pil_font_cache[size]
 
     def _draw_arrow_head(self, draw, start, end, color, width):
         dx, dy = end[0] - start[0], end[1] - start[1]
@@ -862,6 +1039,51 @@ def start_capture(root):
         print("截图失败:", e)
 
 
+def _create_tray_image():
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([4, 4, 60, 60], radius=10, fill="#4A90E2")
+    try:
+        font = ImageFont.truetype(TEXT_FONT_PATH, 32)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((32, 32), "S", fill="white", font=font, anchor="mm")
+    return img
+
+
+def _quit_app(root, icon=None, item=None):
+    global _tray_icon
+    if icon is not None:
+        icon.stop()
+    elif _tray_icon is not None:
+        _tray_icon.stop()
+    try:
+        root.quit()
+        root.destroy()
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+def setup_tray(root):
+    global _tray_icon
+
+    def on_capture(icon, item):
+        root.after(0, lambda: start_capture(root))
+
+    menu = pystray.Menu(
+        pystray.MenuItem("立即截图", on_capture, default=True),
+        pystray.MenuItem("退出", lambda icon, item: _quit_app(root, icon)),
+    )
+    _tray_icon = pystray.Icon(
+        "screenshot_tool",
+        _create_tray_image(),
+        "截图工具\nCtrl+Shift+Alt+X 截图",
+        menu,
+    )
+    threading.Thread(target=_tray_icon.run, daemon=True).start()
+
+
 def main():
     root = tk.Tk()
     root.withdraw()
@@ -881,6 +1103,7 @@ def main():
             while True: time.sleep(1)
 
     threading.Thread(target=hotkey_thread, daemon=True).start()
+    setup_tray(root)
     root.mainloop()
 
 
