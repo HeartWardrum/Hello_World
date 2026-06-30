@@ -873,14 +873,20 @@ class MainWindow(QMainWindow):
         if not pair:
             self._prepend_entry(entry)
             return
-        item, _ = pair
+        item, old_widget = pair
         row = self.list_widget.row(item)
         if row <= 0:
             item.setData(Qt.UserRole, entry)
             return
+        self.list_widget.removeItemWidget(item)
         taken = self.list_widget.takeItem(row)
+        old_widget.deleteLater()
         taken.setData(Qt.UserRole, entry)
         self.list_widget.insertItem(0, taken)
+        widget = EntryItemWidget(entry)
+        self.list_widget.setItemWidget(taken, widget)
+        self._item_map[entry_id] = (taken, widget)
+        self._thumb_loaded.discard(entry_id)
         self.list_widget.setCurrentRow(0)
 
     def _try_incremental_sync(self, entries: list, new_ids: list) -> bool:
