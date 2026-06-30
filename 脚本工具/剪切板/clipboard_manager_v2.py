@@ -1082,8 +1082,7 @@ class MainWindow(QMainWindow):
                                        QMessageBox.Yes | QMessageBox.No)
             if ret == QMessageBox.Yes:
                 self.history.clear_all()
-                self._current_ids = []
-                self._refresh_list()
+                self._full_rebuild_list([], [])
 
     def open_settings(self):
         dlg = SettingsDialog(self.config, self)
