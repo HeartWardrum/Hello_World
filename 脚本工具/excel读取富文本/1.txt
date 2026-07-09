@@ -1,0 +1,4 @@
+m = re.search(r"(?:<b>)?特征区分度(?:</b>)?(.*)", str(b), flags=re.S)
+if not m:
+    return a
+wrapped = "<b>特征区分度</b>" + m.group(1)
