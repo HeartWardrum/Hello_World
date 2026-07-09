@@ -1,3 +1,6 @@
+# SQL Server 添加列及注释
+
+```sql
 -- 1. 添加新列
 ALTER TABLE 表名 
 ADD 列名 数据类型 [NULL | NOT NULL] [DEFAULT 默认值];
@@ -9,3 +12,4 @@ EXEC sp_addextendedproperty
     @level0type = N'SCHEMA',   @level0name = N'dbo',        -- 架构名（通常是 dbo）
     @level1type = N'TABLE',    @level1name = N'表名',       -- 表名
     @level2type = N'COLUMN',   @level2name = N'列名';       -- 列名
+```

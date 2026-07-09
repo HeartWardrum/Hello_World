@@ -27,3 +27,4 @@ out/
 Thumbs.db
 *.pyc
 __pycache__/
+*.~lock*
