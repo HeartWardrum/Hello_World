@@ -37,7 +37,11 @@ DEFAULT_CONFIG = {
     "decimal_places": 0,        # 小数位数: 0(整数) | 1 | 2
 }
 
-OPS_SYMBOL = {"+": "+", "-": "-", "×": "×", "÷": "÷"}  # 显示用
+OPS_SYMBOL = {"+": "+", "-": "-", "×": "×", "÷": "÷", "%": "%"}  # 显示用
+
+class QuitToMenu(Exception):
+    """在练习中按 ESC 抛此异常，回到主菜单"""
+    pass
 
 # ── 工具函数 ───────────────────────────────────────────
 
@@ -87,7 +91,7 @@ def digits_display(spec):
 
 def int_range(digits, scale):
     """返回缩放后的整数范围 [lo, hi]"""
-    lo = (10 ** (digits - 1) if digits > 1 else 1) * scale
+    lo = (10 ** (digits - 1) if digits > 1 else 2) * scale  # 1位数不用1
     hi = ((10 ** digits) - 1) * scale + (scale - 1)
     return lo, hi
 
@@ -198,29 +202,34 @@ def generate_problem(digits_a, digits_b, op, decimal_places=0):
             return a, b, OPS_SYMBOL[op], a * b, ans_d * 2
 
     elif op == "÷":
-        # 右操作数始终为整数（无缩放），答案 d 位小数
+        # 除法不强制整除，答案四舍五入到 N 位小数（N >= 2）
+        ans_d = max(decimal_places, 2)
+        scale_div = 10 ** ans_d
         lo_b_int, hi_b_int = int_range(db, 1)
         for _ in range(30):
             b = random.randint(max(lo_b_int, 2), hi_b_int)
-            q_lo = max((lo_a + b - 1) // b, 2)
-            q_hi = hi_a // b
-            if q_lo <= q_hi:
-                quotient = random.randint(q_lo, q_hi)
-                a = b * quotient
-                if lo_a <= a <= hi_a:
-                    return a, b, OPS_SYMBOL[op], quotient, ans_d
-        for b in range(min(hi_b_int, hi_a // 2), 1, -1):
-            q_lo = max((lo_a + b - 1) // b, 2)
-            q_hi = hi_a // b
-            if q_lo <= q_hi:
-                quotient = random.randint(q_lo, q_hi)
-                a = b * quotient
-                if lo_a <= a <= hi_a:
-                    return a, b, OPS_SYMBOL[op], quotient, ans_d
+            a = random.randint(lo_a, hi_a)
+            # 四舍五入：round(a/b * scale_div) = (a*scale_div + b//2) // b
+            expected = (a * scale_div + b // 2) // b
+            if expected > 0 and a != b:
+                return a, b, OPS_SYMBOL[op], expected, ans_d
+        # 兜底
         b = max(lo_b_int, 2)
-        quotient = max((lo_a + b - 1) // b, 2)
-        a = b * quotient
-        return a, b, OPS_SYMBOL[op], quotient, ans_d
+        a = random.randint(lo_a, hi_a)
+        expected = (a * scale_div + b // 2) // b
+        return a, b, OPS_SYMBOL[op], max(expected, 1), ans_d
+
+    elif op == "%":
+        # A × B% = ?  答案 = A × B / 100，四舍五入
+        ans_d = max(decimal_places, 2)
+        scale_pct = 10 ** ans_d
+        b = random.randint(2, 99)  # 百分数 2~99，避免 1 和 100
+        a = random.randint(lo_a, hi_a)
+        if a == b:
+            b = b + 1 if b < 99 else b - 1
+        # round(a * b / 100 * scale_pct) = (a*b*scale_pct + 50) // 100
+        expected = (a * b * scale_pct + 50) // 100
+        return a, b, OPS_SYMBOL[op], expected, ans_d
 
     return 0, 0, "?", 0, 0
 
@@ -232,6 +241,9 @@ def format_problem(num1, num2, op_sym, dec_places=0, right_dec_places=None):
     right_dec_places: 右操作数小数位数（None=与左相同; 0=整数）
     """
     d = dec_places
+    if op_sym == "%":
+        # 百分数：A × B% = ?
+        return f"{fmt_dec(num1, d)} × {num2}% = ?"
     rd = d if right_dec_places is None else right_dec_places
     if d == 0 and rd == 0:
         return f"{num1} {op_sym} {num2} = ?"
@@ -307,6 +319,13 @@ def input_with_timer(timeout_sec):
             # Ctrl+C
             elif ch == b"\x03":
                 raise KeyboardInterrupt
+
+            # ESC → 退出到主菜单
+            elif ch == b"\x1b":
+                sys.stdout.write("\n\n  已退出当前练习\n")
+                sys.stdout.flush()
+                time.sleep(0.4)
+                raise QuitToMenu()
 
             # 负号 / 小数点 / 数字
             elif ch == b"-" or ch == b"+" or ch == b"." or (b"0" <= ch <= b"9"):
@@ -396,12 +415,14 @@ def show_feedback(result):
         print(f"  正确答案: {exp_disp}")
 
     print()
-    print("  按任意键继续...")
+    print("  按任意键继续 (ESC 退出)...")
 
     # 等待按键
     while msvcrt.kbhit():
         msvcrt.getch()
-    msvcrt.getch()
+    ch = msvcrt.getch()
+    if ch == b"\x1b":
+        raise QuitToMenu()
 
 
 # ── 错题本 ─────────────────────────────────────────────
@@ -766,6 +787,7 @@ def _choose_operations():
     print("  5 — 加减混合")
     print("  6 — 乘除混合")
     print("  7 — 全部混合 (推荐)")
+    print("  8 — 百分数 % (A × B%)")
     print()
 
     mapping = {
@@ -776,10 +798,11 @@ def _choose_operations():
         "5": ["+", "-"],
         "6": ["×", "÷"],
         "7": ["+", "-", "×", "÷"],
+        "8": ["%"],
     }
 
     while True:
-        print("  请选择 (1~7): ", end="", flush=True)
+        print("  请选择 (1~8): ", end="", flush=True)
         ch = msvcrt.getch().decode("utf-8", errors="replace")
         print(ch)
         if ch in mapping:
@@ -839,78 +862,87 @@ def run_practice(config, error_problems=None):
         print(f"  ║  题数: {count:2d}    |  每题限时: {time_per_q}s{dec_info:<8s}║")
     print("  ╚" + "═" * 42 + "╝")
     print()
-    print("  按任意键开始...")
+    print("  按任意键开始 (ESC 返回)...")
     while msvcrt.kbhit():
         msvcrt.getch()
-    msvcrt.getch()
+    if msvcrt.getch() == b"\x1b":
+        return
 
     results = []
     round_start = time.time()
 
-    for i in range(count):
-        clear_screen()
+    try:
+        for i in range(count):
+            clear_screen()
 
-        if is_error_mode:
-            prob = problems[i]
-            num1 = prob["num1"]
-            num2 = prob["num2"]
-            op_sym = OPS_SYMBOL.get(prob["op"], prob["op"])
-            expected = prob["expected"]
-            time_per_q = prob.get("time_limit", time_per_q)
-            d = prob.get("decimal_places", 0)
-            ad = prob.get("ans_dec_places", d)
-            rd = prob.get("right_dec_places")
-        else:
-            op = random.choice(ops)
-            num1, num2, op_sym, expected, ad = generate_problem(
-                digits_a, digits_b, op, dec_places)
-            d = dec_places
-            # 确定右操作数小数位数
-            if op in ("+", "-"):
-                rd = d
-            elif op == "÷":
-                rd = 0
-            elif op == "×":
-                # 右操作数是整数（无缩放）还是小数，用数值范围判断
-                rd = d  # 默认同精度
-                if d > 0:
-                    db_val = resolve_digits(digits_b)
-                    lo_nat = 10 ** (db_val - 1) if db_val > 1 else 1
-                    hi_nat = (10 ** db_val) - 1
-                    if lo_nat <= num2 <= hi_nat:
-                        rd = 0
-
-        # 练习
-        result = play_one_problem(
-            num1, num2, op_sym, expected, time_per_q,
-            idx=i + 1, total=count,
-            dec_places=d, ans_dec_places=ad, right_dec_places=rd,
-            is_error_retry=is_error_mode,
-        )
-        results.append(result)
-
-        # 反馈
-        show_feedback(result)
-
-        # 错题本收集 / 重练标记
-        if is_error_mode:
-            # 错题重练：答对标记 solved
-            if result["correct"]:
-                mark_error_solved(problems[i])
+            if is_error_mode:
+                prob = problems[i]
+                num1 = prob["num1"]
+                num2 = prob["num2"]
+                op_sym = OPS_SYMBOL.get(prob["op"], prob["op"])
+                expected = prob["expected"]
+                time_per_q = prob.get("time_limit", time_per_q)
+                d = prob.get("decimal_places", 0)
+                ad = prob.get("ans_dec_places", d)
+                rd = prob.get("right_dec_places")
             else:
-                increment_error_retry(problems[i])
+                op = random.choice(ops)
+                num1, num2, op_sym, expected, ad = generate_problem(
+                    digits_a, digits_b, op, dec_places)
+                d = dec_places
+                # 确定右操作数小数位数
+                if op in ("+", "-"):
+                    rd = d
+                elif op in ("÷", "%"):
+                    rd = 0
+                elif op == "×":
+                    rd = d
+                    if d > 0:
+                        db_val = resolve_digits(digits_b)
+                        lo_nat = 10 ** (db_val - 1) if db_val > 1 else 1
+                        hi_nat = (10 ** db_val) - 1
+                        if lo_nat <= num2 <= hi_nat:
+                            rd = 0
+
+            # 练习
+            result = play_one_problem(
+                num1, num2, op_sym, expected, time_per_q,
+                idx=i + 1, total=count,
+                dec_places=d, ans_dec_places=ad, right_dec_places=rd,
+                is_error_retry=is_error_mode,
+            )
+            results.append(result)
+
+            # 反馈
+            show_feedback(result)
+
+            # 错题本收集 / 重练标记
+            if is_error_mode:
+                if result["correct"]:
+                    mark_error_solved(problems[i])
+                else:
+                    increment_error_retry(problems[i])
+            else:
+                if not result["correct"]:
+                    add_to_error_book(result, config)
+
+        round_end = time.time()
+        total_time = round_end - round_start
+
+        if is_error_mode:
+            show_error_summary(results, total_time)
         else:
-            # 普通练习：答错/超时 写入错题本
-            if not result["correct"]:
-                add_to_error_book(result, config)
+            show_summary(results, total_time, config)
 
-    round_end = time.time()
-    total_time = round_end - round_start
-
-    if is_error_mode:
-        show_error_summary(results, total_time)
-    else:
-        show_summary(results, total_time, config)
+    except QuitToMenu:
+        # 中途按 ESC 退出，已答题目照常统计
+        if results:
+            round_end = time.time()
+            total_time = round_end - round_start
+            if is_error_mode:
+                show_error_summary(results, total_time)
+            else:
+                show_summary(results, total_time, config)
 
 
 # ── 主菜单 ─────────────────────────────────────────────
