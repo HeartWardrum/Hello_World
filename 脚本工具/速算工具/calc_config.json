@@ -1,9 +1,12 @@
 {
-  "digits": 3,
+  "digits_a": 3,
+  "digits_b": 2,
   "operations": [
+    "+",
+    "-",
     "×",
     "÷"
   ],
   "problem_count": 10,
-  "time_per_question": 15
+  "time_per_question": 30
 }

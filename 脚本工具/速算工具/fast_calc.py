@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-速算练习工具 —— 公务员行测专用
+速算练习工具 —— 
 ================================
 运行环境: Windows 11 CMD (需 Python 3.7+)
 功能:
@@ -28,7 +28,8 @@ HISTORY_FILE = os.path.join(BASE_DIR, "calc_history.json")
 
 # ── 默认配置 ───────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "digits": 2,                # 位数: 1 | 2 | 3 | 4 | 5
+    "digits_a": 2,              # 左操作数位数: 1~5
+    "digits_b": 2,              # 右操作数位数: 1~5
     "operations": ["+", "-", "×", "÷"],  # 启用的运算符
     "problem_count": 10,        # 每轮题数: 5~50
     "time_per_question": 30,    # 每题限时(秒): 5~120
@@ -72,47 +73,88 @@ def set_console_title(text):
 
 # ── 题目生成 ───────────────────────────────────────────
 
-def generate_problem(digits, op):
+def generate_problem(digits_a, digits_b, op):
     """
-    生成一道速算题。
+    生成一道速算题。左右操作数各自独立的位数范围。
     返回 (num1, num2, op_symbol, expected_answer)
     """
-    lo = 10 ** (digits - 1) if digits > 1 else 1
-    hi = (10 ** digits) - 1
+    lo_a = 10 ** (digits_a - 1) if digits_a > 1 else 1
+    hi_a = (10 ** digits_a) - 1
+    lo_b = 10 ** (digits_b - 1) if digits_b > 1 else 1
+    hi_b = (10 ** digits_b) - 1
+
+    def retry_if_equal(get_a, get_b, max_tries=8):
+        """通用防重复：若 a==b 则重抽，最多 max_tries 次"""
+        for _ in range(max_tries):
+            a_val = get_a()
+            b_val = get_b()
+            if a_val != b_val:
+                return a_val, b_val
+        # 最终还是相同的话，把 b 微调一下
+        a_val = get_a()
+        b_val = get_b()
+        if a_val == b_val:
+            b_val = b_val + 1 if b_val < hi_b else b_val - 1
+        return a_val, b_val
 
     if op == "+":
-        a = random.randint(lo, hi)
-        b = random.randint(lo, hi)
+        a, b = retry_if_equal(
+            lambda: random.randint(lo_a, hi_a),
+            lambda: random.randint(lo_b, hi_b),
+        )
         return a, b, OPS_SYMBOL[op], a + b
 
     elif op == "-":
-        a = random.randint(lo, hi)
-        b = random.randint(lo, hi)
-        if a < b:
-            a, b = b, a
+        # 减法：保证 a > b，且差不小于阈值（避免太简单）
+        min_diff = max(lo_a, lo_b) // 3
+        for _ in range(10):
+            a = random.randint(lo_a, hi_a)
+            b = random.randint(lo_b, hi_b)
+            if a > b and (a - b) >= min_diff:
+                return a, b, OPS_SYMBOL[op], a - b
+        # 兜底：先定 b，再从保证 a > b 的范围中抽 a
+        b = random.randint(lo_b, hi_b)
+        a_lo = max(lo_a, b + max(min_diff, 1))
+        if a_lo > hi_a:
+            # b 太大，换一个小一点的 b
+            b = random.randint(lo_b, max(lo_b, hi_a - min_diff - 1)) if hi_a - min_diff - 1 >= lo_b else lo_b
+            a_lo = max(lo_a, b + max(min_diff, 1))
+        a = random.randint(a_lo, hi_a) if a_lo <= hi_a else hi_a
+        if a <= b:
+            a = b + max(min_diff, 1)
         return a, b, OPS_SYMBOL[op], a - b
 
     elif op == "×":
-        # 控制乘积范围，避免过于庞大的数
-        if digits <= 2:
-            a = random.randint(lo, hi)
-            b = random.randint(lo, hi)
-        elif digits == 3:
-            a = random.randint(lo, min(hi, 500))
-            b = random.randint(lo, min(hi, 200))
-        else:
-            a = random.randint(lo, min(hi, 2000))
-            b = random.randint(2, min(hi, 50))
+        # 乘法：各自独立范围（不再硬编码限死）
+        a, b = retry_if_equal(
+            lambda: random.randint(lo_a, hi_a),
+            lambda: random.randint(lo_b, hi_b),
+        )
         return a, b, OPS_SYMBOL[op], a * b
 
     elif op == "÷":
-        # 保证整除
-        if digits == 1:
-            b = random.randint(1, 9)
-            quotient = random.randint(1, 9)
-        else:
-            b = random.randint(2, min(hi, 99))
-            quotient = random.randint(lo // b if lo // b > 0 else 1, hi // b)
+        # 除法：b 从右数范围取，商从左数范围约束；避免商=1
+        for _ in range(30):
+            b = random.randint(max(lo_b, 2), hi_b)  # 除数至少 2
+            q_lo = max((lo_a + b - 1) // b, 2)      # ceil(lo_a/b)，商至少 2
+            q_hi = hi_a // b
+            if q_lo <= q_hi:
+                quotient = random.randint(q_lo, q_hi)
+                a = b * quotient
+                if lo_a <= a <= hi_a:
+                    return a, b, OPS_SYMBOL[op], quotient
+        # 兜底：降低 b 的上限，保证能得到合法 a
+        for b in range(min(hi_b, hi_a // 2), 1, -1):
+            q_lo = max((lo_a + b - 1) // b, 2)
+            q_hi = hi_a // b
+            if q_lo <= q_hi:
+                quotient = random.randint(q_lo, q_hi)
+                a = b * quotient
+                if lo_a <= a <= hi_a:
+                    return a, b, OPS_SYMBOL[op], quotient
+        # 最终兜底
+        b = max(lo_b, 2)
+        quotient = max((lo_a + b - 1) // b, 2)
         a = b * quotient
         return a, b, OPS_SYMBOL[op], quotient
 
@@ -340,7 +382,8 @@ def save_history(results, total_time, config, accuracy):
     history = load_json(HISTORY_FILE, [])
     record = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "digits": config["digits"],
+        "digits_a": config.get("digits_a", config.get("digits", 2)),
+        "digits_b": config.get("digits_b", config.get("digits", 2)),
         "ops": config["operations"],
         "total": len(results),
         "correct": sum(1 for r in results if r["correct"]),
@@ -369,13 +412,16 @@ def show_history():
     if not history:
         print("  ║" + " " * 17 + "暂无记录" + " " * 19 + "║")
     else:
-        print("  ║  时间          位数  运算     题数  正确  正确率 ║")
+        print("  ║  时间          位数      运算     题数  正确  正确率 ║")
         print("  ║" + "─" * 50 + "║")
         for r in reversed(history[-20:]):  # 最近20条
             ops_short = "".join(r.get("ops", ["?"])[:3])
+            da = r.get("digits_a", r.get("digits", "?"))
+            db = r.get("digits_b", r.get("digits", "?"))
+            digits_str = f"{da}vs{db}"
             line = (
                 f"  ║  {r['time']}  "
-                f"{r['digits']}位  "
+                f"{digits_str:<6}  "
                 f"{ops_short:<6}  "
                 f"{r['total']:2d}题  "
                 f"{r['correct']:2d}✓  "
@@ -403,7 +449,9 @@ def settings_menu(config):
         print("  ╔" + "═" * 42 + "╗")
         print("  ║" + " " * 16 + "设   置" + " " * 17 + "║")
         print("  ╠" + "═" * 42 + "╣")
-        print(f"  ║  [1] 位数        →  {config['digits']} 位整数        ║")
+        da = config.get("digits_a", config.get("digits", 2))
+        db = config.get("digits_b", config.get("digits", 2))
+        print(f"  ║  [1] 位数        →  {da} 位 vs {db} 位          ║")
         print(f"  ║  [2] 运算符      →  {ops_display:<20s}   ║")
         print(f"  ║  [3] 题目数量    →  {config['problem_count']:2d} 题              ║")
         print(f"  ║  [4] 每题限时    →  {config['time_per_question']:3d} 秒            ║")
@@ -419,7 +467,9 @@ def settings_menu(config):
         if ch == "0":
             break
         elif ch == "1":
-            config["digits"] = _choose_digits()
+            da, db = _choose_two_digits(config)
+            config["digits_a"] = da
+            config["digits_b"] = db
         elif ch == "2":
             config["operations"] = _choose_operations()
         elif ch == "3":
@@ -434,16 +484,36 @@ def settings_menu(config):
     save_json(CONFIG_FILE, config)
 
 
-def _choose_digits():
-    """选位数"""
-    print("\n  可选的位数:")
-    print("  1 — 1 位 (1~9)")
-    print("  2 — 2 位 (10~99)")
-    print("  3 — 3 位 (100~999)")
-    print("  4 — 4 位 (1000~9999)")
-    print("  5 — 5 位 (10000~99999)")
+def _choose_two_digits(config):
+    """分别选择左数和右数的位数，支持快捷预设"""
+    da = config.get("digits_a", config.get("digits", 2))
+    db = config.get("digits_b", config.get("digits", 2))
+
     print()
-    return _input_int("  请选择位数 (1~5): ", 1, 5, 2)
+    print("  ┌" + "─" * 38 + "┐")
+    print(f"  │  当前: 左数 {da} 位  vs  右数 {db} 位" + " " * (13 - len(str(da)) - len(str(db))) + "│")
+    print("  ├" + "─" * 38 + "┤")
+    print("  │  快捷预设:                              │")
+    print("  │  1 — 相同位数 (与左数一致)              │")
+    print("  │  2 — 2位 vs 1位  (如 23 + 8)           │")
+    print("  │  3 — 3位 vs 2位  (如 345 + 67)         │")
+    print("  │  4 — 4位 vs 2位  (如 5678 ÷ 23)        │")
+    print("  │  5 — 自定义                             │")
+    print("  └" + "─" * 38 + "┘")
+    print()
+
+    presets = {"1": (da, da), "2": (2, 1), "3": (3, 2), "4": (4, 2)}
+    while True:
+        print("  请选择 (1~5): ", end="", flush=True)
+        ch = msvcrt.getch().decode("utf-8", errors="replace")
+        print(ch)
+        if ch in presets:
+            return presets[ch]
+        elif ch == "5":
+            da = _input_int("  左数位数 (1~5): ", 1, 5, da)
+            db = _input_int("  右数位数 (1~5): ", 1, 5, db)
+            return da, db
+        print("  无效选项，请重新选择")
 
 
 def _choose_operations():
@@ -499,7 +569,8 @@ def run_practice(config):
     """执行一轮练习"""
     clear_screen()
 
-    digits = config["digits"]
+    digits_a = config.get("digits_a", config.get("digits", 2))
+    digits_b = config.get("digits_b", config.get("digits", 2))
     ops = config["operations"]
     count = config["problem_count"]
     time_per_q = config["time_per_question"]
@@ -508,7 +579,7 @@ def run_practice(config):
     ops_display = " ".join(OPS_SYMBOL.get(o, o) for o in ops)
     print()
     print("  ╔" + "═" * 42 + "╗")
-    print(f"  ║  位数: {digits} 位  |  运算: {ops_display:<18s}║")
+    print(f"  ║  位数: {digits_a}位 vs {digits_b}位  |  运算: {ops_display:<10s}║")
     print(f"  ║  题数: {count:2d}    |  每题限时: {time_per_q} 秒          ║")
     print("  ╚" + "═" * 42 + "╝")
     print()
@@ -526,7 +597,7 @@ def run_practice(config):
         # 随机选择运算符
         op = random.choice(ops)
         # 生成题目
-        num1, num2, op_sym, expected = generate_problem(digits, op)
+        num1, num2, op_sym, expected = generate_problem(digits_a, digits_b, op)
 
         # 练习
         result = play_one_problem(num1, num2, op_sym, expected, time_per_q,
@@ -549,18 +620,27 @@ def main_menu():
     """主菜单循环"""
     config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
 
+    # 向后兼容：旧配置中只有 "digits"，自动迁移
+    if "digits" in config and "digits_a" not in config:
+        config["digits_a"] = config["digits"]
+        config["digits_b"] = config["digits"]
+        del config["digits"]
+        save_json(CONFIG_FILE, config)
+
     while True:
         clear_screen()
-        set_console_title("速算练习工具 - 行测专用")
+        set_console_title("速算练习工具")
 
         ops_display = " ".join(OPS_SYMBOL.get(o, o) for o in config["operations"])
+        da = config.get("digits_a", 2)
+        db = config.get("digits_b", 2)
 
         print()
         print("  ╔" + "═" * 42 + "╗")
-        print("  ║" + " " * 3 + "⚡ 速 算 练 习 工 具 — 行 测 专 用 ⚡" + " " * 3 + "║")
+        print("  ║" + " " * 3 + "⚡ 速 算 练 习 工 具 —        用 ⚡" + " " * 3 + "║")
         print("  ╠" + "═" * 42 + "╣")
         print("  ║                                          ║")
-        print(f"  ║   当前设置: {config['digits']}位 | {ops_display:<12s} | {config['problem_count']:2d}题/{config['time_per_question']}s   ║")
+        print(f"  ║   当前设置: {da}位vs{db}位 | {ops_display:<10s} | {config['problem_count']:2d}题/{config['time_per_question']}s   ║")
         print("  ║                                          ║")
         print("  ║   [1] 开始练习                            ║")
         print("  ║   [2] 修改设置                            ║")
@@ -603,11 +683,13 @@ def show_help():
     print("  ║  本工具模拟考场紧迫感，训练快速心算能力。       ║")
     print("  ║                                            ║")
     print("  ║  建议设置:                                  ║")
-    print("  ║  · 入门: 2位加法, 20题, 限时30s              ║")
-    print("  ║  · 进阶: 3位加减混合, 15题, 限时20s          ║")
-    print("  ║  · 高手: 4位全混合, 10题, 限时15s            ║")
+    print("  ║  · 入门: 2位vs1位加法, 20题, 限时30s         ║")
+    print("  ║  · 进阶: 3位vs2位加减, 15题, 限时20s         ║")
+    print("  ║  · 高手: 4位vs2位全混合, 10题, 限时15s       ║")
+    print("  ║  · 资料分析: 3位vs1位除法, 15题, 限时20s     ║")
     print("  ║                                            ║")
     print("  ║  技巧提示:                                  ║")
+    print("  ║  · 左右数可分别指定位数，模拟真实计算场景      ║")
     print("  ║  · 除法保证整除，答案一定是整数               ║")
     print("  ║  · 可输入负号 - 表示负数答案                  ║")
     print("  ║  · 退格键可修改输入                          ║")
