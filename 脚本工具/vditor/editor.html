@@ -9,50 +9,262 @@
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; padding: 0; background-color: #f5f6f7; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; }
-        .app-bar { height: 50px; background: #ffffff; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); z-index: 100; }
+        .app-bar { height: 50px; background: #ffffff; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); z-index: 100; flex-shrink: 0; }
         .btn-group { display: flex; gap: 8px; }
         button { height: 32px; padding: 0 15px; border: 1px solid #dcdfe6; background: #fff; color: #606266; border-radius: 4px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 5px; transition: all 0.2s; }
         button:hover { color: #409eff; border-color: #c6e2ff; background-color: #ecf5ff; }
         button.primary { background: #409eff; color: #fff; border-color: #409eff; }
         button.primary:hover { background: #66b1ff; border-color: #66b1ff; color: #fff; }
         .file-info { font-size: 13px; color: #909399; max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #f4f4f5; padding: 4px 10px; border-radius: 4px; border: 1px solid #e9e9eb; }
-        #editor-container { flex: 1; overflow: hidden; padding: 10px 20px 20px 20px; }
+
+        /* ===== Main Area (horizontal flex) ===== */
+        #main-area { display: flex; flex: 1; overflow: hidden; }
+
+        /* ===== Sidebar ===== */
+        #sidebar {
+            width: 280px;
+            min-width: 180px;
+            max-width: 600px;
+            background: #ffffff;
+            border-right: 1px solid #dcdfe6;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            transition: width 0.2s ease, min-width 0.2s ease;
+            position: relative;
+            z-index: 10;
+            flex-shrink: 0;
+        }
+        #sidebar.collapsed {
+            width: 0 !important;
+            min-width: 0 !important;
+            border-right: none;
+            overflow: hidden;
+        }
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #303133;
+            border-bottom: 1px solid #ebeef5;
+            flex-shrink: 0;
+        }
+        .sidebar-close-btn {
+            background: none;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            color: #909399;
+            padding: 0 4px;
+            height: auto;
+            line-height: 1;
+        }
+        .sidebar-close-btn:hover { color: #606266; }
+        .sidebar-toolbar {
+            display: flex;
+            gap: 4px;
+            padding: 6px 8px;
+            border-bottom: 1px solid #ebeef5;
+            flex-shrink: 0;
+        }
+        .sidebar-toolbar button {
+            height: 26px;
+            padding: 0 8px;
+            font-size: 12px;
+        }
+
+        /* ===== Resizer Handle ===== */
+        #sidebar-resizer {
+            position: absolute;
+            right: -2px;
+            top: 0;
+            bottom: 0;
+            width: 6px;
+            cursor: col-resize;
+            z-index: 20;
+            background: transparent;
+        }
+        #sidebar-resizer:hover,
+        #sidebar-resizer.active { background: #409eff; }
+
+        /* ===== Tree View ===== */
+        .tree-container {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 4px 0;
+        }
+        .tree-placeholder {
+            color: #c0c4cc;
+            text-align: center;
+            padding: 40px 16px;
+            font-size: 13px;
+        }
+        .tree-item {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            cursor: default;
+            font-size: 13px;
+            color: #303133;
+            white-space: nowrap;
+            user-select: none;
+            min-height: 28px;
+            padding-right: 8px;
+        }
+        .tree-item:hover { background-color: #f5f7fa; }
+        .tree-item.selected { background-color: #ecf5ff; color: #409eff; }
+        .tree-item .toggle {
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+            font-size: 10px;
+            color: #909399;
+            transition: transform 0.15s;
+            cursor: pointer;
+            line-height: 28px;
+        }
+        .tree-item .toggle.expanded { transform: rotate(90deg); }
+        .tree-item .icon {
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+            font-size: 14px;
+        }
+        .tree-item .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1;
+        }
+        .tree-item .name.binary { color: #c0c4cc; cursor: not-allowed; }
+
+        /* ===== Editor Container ===== */
+        #editor-container { flex: 1; overflow: hidden; padding: 10px 20px 20px 20px; min-width: 0; }
         .vditor { border: 1px solid #dcdfe6 !important; border-radius: 6px !important; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.03); }
+
+        /* ===== Dark Theme ===== */
+        body.dark-theme { background-color: #1e1e1e; }
+        body.dark-theme .app-bar { background: #252526; }
+        body.dark-theme #sidebar { background: #252526; border-right-color: #3c3c3c; }
+        body.dark-theme .sidebar-header { color: #cccccc; border-bottom-color: #3c3c3c; }
+        body.dark-theme .sidebar-toolbar { border-bottom-color: #3c3c3c; }
+        body.dark-theme .tree-item { color: #cccccc; }
+        body.dark-theme .tree-item:hover { background-color: #2a2d2e; }
+        body.dark-theme .tree-item.selected { background-color: #37373d; color: #569cd6; }
+        body.dark-theme .tree-item .name.binary { color: #5a5a5a; }
+        body.dark-theme .tree-placeholder { color: #5a5a5a; }
+        body.dark-theme .file-info { background: #3c3c3c; color: #cccccc; border-color: #555; }
+
+        /* ===== Context Menu ===== */
+        #context-menu {
+            display: none;
+            position: fixed;
+            z-index: 999;
+            background: #ffffff;
+            border: 1px solid #e4e7ed;
+            border-radius: 4px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+            padding: 4px 0;
+            min-width: 150px;
+            font-size: 13px;
+        }
+        #context-menu .menu-item {
+            padding: 8px 16px;
+            cursor: pointer;
+            color: #606266;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #context-menu .menu-item:hover { background: #f5f7fa; color: #409eff; }
+        #context-menu .menu-divider {
+            height: 1px;
+            background: #ebeef5;
+            margin: 4px 0;
+        }
+        #context-menu .menu-item.danger { color: #f56c6c; }
+        #context-menu .menu-item.danger:hover { background: #fef0f0; color: #f56c6c; }
+        body.dark-theme #context-menu { background: #252526; border-color: #3c3c3c; }
+        body.dark-theme #context-menu .menu-item { color: #cccccc; }
+        body.dark-theme #context-menu .menu-item:hover { background: #2a2d2e; }
+        body.dark-theme #context-menu .menu-divider { background: #3c3c3c; }
     </style>
 </head>
 <body>
 
     <div class="app-bar">
         <div class="btn-group">
-            <button onclick="openAnyFile()">📂 打开文件</button>
-            <button class="primary" onclick="saveLocalFile(false)">💾 手动保存 (Ctrl+S)</button>
+            <button onclick="toggleSidebar()" id="btn-toggle-sidebar">📁 浏览</button>
+            <button class="primary" onclick="saveCurrentFile()">💾 保存 (Ctrl+S)</button>
             <button onclick="switchTheme()">🌓 切换深色模式</button>
         </div>
-        <div id="file-status" class="file-info">当前未打开文件 (支持自动保存)</div>
+        <div id="file-status" class="file-info">📁 文档文件夹已加载</div>
     </div>
 
-    <div id="editor-container">
-        <div id="vditor"></div>
+    <div id="main-area">
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <span id="sidebar-title">📁 文档</span>
+                <button class="sidebar-close-btn" onclick="toggleSidebar()" title="关闭侧边栏">✕</button>
+            </div>
+            <div id="sidebar-resizer"></div>
+            <div class="sidebar-toolbar">
+                <button onclick="collapseAllFolders()">📁 收起全部</button>
+                <button onclick="refreshTree()">🔄 刷新</button>
+                <button onclick="createNewFile(null)">📄 新建文件</button>
+                <button onclick="createNewFolder(null)">📁 新建文件夹</button>
+            </div>
+            <div id="tree-container" class="tree-container">
+                <div class="tree-placeholder">加载中...</div>
+            </div>
+        </div>
+
+        <div id="editor-container">
+            <div id="vditor"></div>
+        </div>
     </div>
+
+    <!-- Right-click Context Menu -->
+    <div id="context-menu"></div>
 
     <script>
+        // ===== Global State =====
         let vditorInstance;
-        let activeFileHandle = null; 
         let isDarkTheme = false;
-        let autoSaveTimer = null;
+        let sidebarWidth = 280;
+        let isSidebarOpen = true;
+        let isDragging = false;
 
+        // File Tree State
+        let fileTreeData = null;
+        let expandedPaths = new Set();
+        let activeFilePath = null;
+        let activeFileHandleName = null;
+
+        // Auto-save State
+        let lastSavedContent = '';
+        let isDirty = false;
+        let autoSaveTimer = null;
+        let autoRefreshTimer = null;
+
+        // Context Menu State
+        let contextMenuTarget = null;
+
+        // ===== Vditor Initialization =====
         vditorInstance = new Vditor('vditor', {
             height: window.innerHeight - 85,
-            mode: 'wysiwyg', 
+            mode: 'wysiwyg',
             lang: 'zh_CN',
-            placeholder: '在此输入内容，或打开本地文件。本编辑器支持多重防丢：打字时自动暂存浏览器；打开本地文件后，每隔15秒自动同步到硬盘。',
+            placeholder: '在此输入内容。左侧浏览「文档」文件夹中的文件。',
             counter: { enable: true },
             outline: { enable: true, position: 'left' },
             resize: { enable: false },
-            // 🛡️ 机制一：开启 Vditor 自带的浏览器缓存机制
             cache: {
                 enable: true,
-                id: 'vditor-local-cache' // 就算断电、网页关闭，下次进来内容依然在
+                id: 'vditor-local-cache'
             },
             toolbar: [
                 "headings", "bold", "italic", "strike", "link", "|",
@@ -62,133 +274,590 @@
                 "fullscreen", "edit-mode"
             ],
             after: () => {
-                // 初始化完成后，开启硬盘定时保存轮询
-                startAutoSaveTimer();
+                resizeVditor();
+                // Bind dirty tracking on editor content change
+                const editorEl = document.getElementById('vditor');
+                if (editorEl) {
+                    editorEl.addEventListener('input', () => markDirty());
+                }
             }
         });
 
-        // 快捷键保存 (Ctrl + S)
+        // ===== Keyboard Shortcuts =====
         window.addEventListener('keydown', (e) => {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
                 e.preventDefault();
-                saveLocalFile(false);
+                saveCurrentFile();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+                e.preventDefault();
+                toggleSidebar();
             }
         });
 
-        window.addEventListener('resize', () => {
-            if(vditorInstance) {
-                vditorInstance.resize(window.innerWidth - 40, window.innerHeight - 85);
+        // ===== Resize Handling =====
+        function resizeVditor() {
+            if (!vditorInstance) return;
+            const editorContainer = document.getElementById('editor-container');
+            const availWidth = editorContainer.clientWidth;
+            const availHeight = window.innerHeight - 85;
+            vditorInstance.resize(availWidth, availHeight);
+        }
+
+        window.addEventListener('resize', resizeVditor);
+
+        // ===== Sidebar Toggle =====
+        function toggleSidebar() {
+            isSidebarOpen = !isSidebarOpen;
+            const sidebar = document.getElementById('sidebar');
+            if (isSidebarOpen) {
+                sidebar.classList.remove('collapsed');
+                sidebar.style.width = sidebarWidth + 'px';
+            } else {
+                sidebar.classList.add('collapsed');
+            }
+            setTimeout(() => resizeVditor(), 220);
+        }
+
+        // ===== Sidebar Resizer =====
+        function initSidebarResizer() {
+            const resizer = document.getElementById('sidebar-resizer');
+            const sidebar = document.getElementById('sidebar');
+
+            resizer.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                isDragging = true;
+                resizer.classList.add('active');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                e.preventDefault();
+                const mainArea = document.getElementById('main-area');
+                const containerRect = mainArea.getBoundingClientRect();
+                let newWidth = e.clientX - containerRect.left;
+                newWidth = Math.max(180, Math.min(600, newWidth));
+                sidebar.style.width = newWidth + 'px';
+                sidebar.classList.remove('collapsed');
+                sidebarWidth = newWidth;
+                isSidebarOpen = true;
+                resizeVditor();
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    resizer.classList.remove('active');
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                    try { localStorage.setItem('vditor-sidebar-width', sidebarWidth); } catch (e) { }
+                }
+            });
+        }
+
+        // Restore sidebar width from localStorage
+        try {
+            const saved = localStorage.getItem('vditor-sidebar-width');
+            if (saved) sidebarWidth = parseInt(saved) || 280;
+        } catch (e) { }
+
+        initSidebarResizer();
+
+        // ===== API: Load File Tree =====
+        async function loadFileTree() {
+            try {
+                const response = await fetch('/api/tree');
+                if (!response.ok) throw new Error('服务器错误: ' + response.status);
+                fileTreeData = await response.json();
+                expandedPaths.add(fileTreeData.path);
+                renderTree();
+                document.getElementById('sidebar-title').textContent = '📁 ' + fileTreeData.name;
+                updateStatusText('📁 已加载文件夹: ' + fileTreeData.name);
+            } catch (err) {
+                console.error('加载文件树失败:', err);
+                document.getElementById('tree-container').innerHTML =
+                    '<div class="tree-placeholder">❌ 加载失败: ' + escapeHtml(err.message) + '</div>';
+                updateStatusText('❌ 加载文件夹失败: ' + err.message, '#fef0f0', '#f56c6c');
+            }
+        }
+
+        // ===== API: Read File =====
+        async function readFile(relativePath) {
+            const response = await fetch('/api/read?path=' + encodeURIComponent(relativePath));
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '读取失败');
+            }
+            const data = await response.json();
+            return data.content;
+        }
+
+        // ===== API: Save File =====
+        async function saveFile(relativePath, content) {
+            const response = await fetch('/api/save?path=' + encodeURIComponent(relativePath), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: content })
+            });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '保存失败');
+            }
+            return true;
+        }
+
+        // ===== API: Mkdir =====
+        async function apiMkdir(dirPath) {
+            const response = await fetch('/api/mkdir?path=' + encodeURIComponent(dirPath), { method: 'POST' });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '创建文件夹失败');
+            }
+        }
+
+        // ===== API: Create File =====
+        async function apiCreateFile(filePath) {
+            const response = await fetch('/api/create?path=' + encodeURIComponent(filePath), { method: 'POST' });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '创建文件失败');
+            }
+        }
+
+        // ===== API: Rename =====
+        async function apiRename(oldPath, newName) {
+            const response = await fetch('/api/rename?path=' + encodeURIComponent(oldPath) + '&newName=' + encodeURIComponent(newName), { method: 'POST' });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '重命名失败');
+            }
+        }
+
+        // ===== API: Delete =====
+        async function apiDelete(targetPath) {
+            const response = await fetch('/api/delete?path=' + encodeURIComponent(targetPath), { method: 'POST' });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || '删除失败');
+            }
+        }
+
+        // ===== Tree Rendering =====
+        function renderTree() {
+            const container = document.getElementById('tree-container');
+            if (!fileTreeData) {
+                container.innerHTML = '<div class="tree-placeholder">点击"打开文件夹"浏览目录</div>';
+                return;
+            }
+            const html = renderTreeNode(fileTreeData, 0);
+            container.innerHTML = html;
+        }
+
+        function renderTreeNode(node, depth) {
+            if (node.type === 'error') {
+                return '<div class="tree-item" style="padding-left:' + (depth * 18 + 8) + 'px;color:#f56c6c;">'
+                    + '<span class="name">' + escapeHtml(node.name) + '</span></div>';
+            }
+
+            const isDir = node.type === 'directory';
+            const isExpanded = expandedPaths.has(node.path);
+            const isSelected = activeFilePath === node.path;
+
+            let icon = '📄';
+            if (isDir) {
+                icon = isExpanded ? '📂' : '📁';
+            } else if (node.isBinary) {
+                icon = '📦';
+            }
+
+            const toggleHtml = isDir
+                ? '<span class="toggle' + (isExpanded ? ' expanded' : '') + '" data-path="' + node.path + '">▶</span>'
+                : '<span class="toggle"></span>';
+
+            const nameClass = node.isBinary ? 'name binary' : 'name';
+            const selectedClass = isSelected ? ' selected' : '';
+
+            let html = '<div class="tree-item' + selectedClass + '" data-path="' + node.path + '" data-type="' + node.type + '" data-isfile="' + (node.type === 'file') + '" data-isbinary="' + (node.isBinary || false) + '" style="padding-left:' + (depth * 18 + 8) + 'px">'
+                + toggleHtml
+                + '<span class="icon">' + icon + '</span>'
+                + '<span class="' + nameClass + '" title="' + escapeHtml(node.path) + '">' + escapeHtml(node.name) + '</span>'
+                + '</div>';
+
+            if (isDir && isExpanded) {
+                html += '<div class="tree-children">';
+                if (node.children) {
+                    for (const child of node.children) {
+                        html += renderTreeNode(child, depth + 1);
+                    }
+                }
+                html += '</div>';
+            }
+
+            return html;
+        }
+
+        // ===== Finding Node by Path =====
+        function findNodeByPath(node, targetPath) {
+            if (node.path === targetPath) return node;
+            if (node.children) {
+                for (const child of node.children) {
+                    const found = findNodeByPath(child, targetPath);
+                    if (found) return found;
+                }
+            }
+            return null;
+        }
+
+        // ===== Tree Event Handling (Delegation) =====
+        document.getElementById('tree-container').addEventListener('click', async (e) => {
+            const item = e.target.closest('.tree-item');
+            if (!item) return;
+
+            const path = item.dataset.path;
+            const type = item.dataset.type;
+            const isBinary = item.dataset.isbinary === 'true';
+            const isFile = item.dataset.isfile === 'true';
+
+            // Toggle click (expand/collapse folder)
+            if (e.target.classList.contains('toggle') && type === 'directory') {
+                e.stopPropagation();
+                toggleFolder(path);
+                return;
+            }
+
+            // File click
+            if (isFile) {
+                if (isBinary) {
+                    updateStatusText('⚠️ 无法打开二进制文件', '#fef0f0', '#f56c6c');
+                    return;
+                }
+                await openFileByPath(path);
+                return;
+            }
+
+            // Directory click (toggle expand/collapse by clicking the row)
+            if (type === 'directory') {
+                toggleFolder(path);
             }
         });
 
-        // 打开任意文本文件
-        async function openAnyFile() {
+        // Right-click on tree items or container background
+        document.getElementById('tree-container').addEventListener('contextmenu', (e) => {
+            const item = e.target.closest('.tree-item');
+            if (item) {
+                showContextMenu(e, item.dataset.path, item.dataset.type);
+            } else {
+                // Right-click on empty area of tree container
+                showContextMenu(e, null, 'background');
+            }
+        });
+
+        // ===== Toggle Folder =====
+        function toggleFolder(path) {
+            if (expandedPaths.has(path)) {
+                expandedPaths.delete(path);
+                renderTree();
+            } else {
+                expandedPaths.add(path);
+                renderTree();
+            }
+        }
+
+        function collapseAllFolders() {
+            expandedPaths.clear();
+            if (fileTreeData) {
+                expandedPaths.add(fileTreeData.path);
+            }
+            renderTree();
+        }
+
+        // ===== Refresh Tree =====
+        async function refreshTree() {
+            await loadFileTree();
+        }
+
+        // ===== Open File by Path =====
+        async function openFileByPath(relativePath) {
             try {
-                [activeFileHandle] = await window.showOpenFilePicker({
-                    types: [{
-                        description: '所有文本文件',
-                        accept: { 'text/*': ['.txt', '.log', '.md', '.markdown', '.html', '.json', '.ini', '.conf'] }
-                    }],
-                    excludeAcceptAllOption: false
-                });
-                
-                const file = await activeFileHandle.getFile();
-                const text = await file.text();
-                
-                // 载入文本
-                vditorInstance.setValue(text);
-                updateStatusText(`已载入: ${file.name}`);
-                
-                // 智能模式切换
-                const extension = file.name.split('.').pop().toLowerCase();
-                if (['log', 'txt', 'conf', 'ini', 'json'].includes(extension)) {
-                    vditorInstance.setMode('sv'); 
-                } else {
-                    vditorInstance.setMode('wysiwyg');
+                const content = await readFile(relativePath);
+                activeFilePath = relativePath;
+
+                // Extract filename for display
+                const parts = relativePath.split('/');
+                const fileName = parts[parts.length - 1];
+                activeFileHandleName = fileName;
+
+                vditorInstance.setValue(content);
+                lastSavedContent = content;
+                isDirty = false;
+
+                const extension = fileName.split('.').pop().toLowerCase();
+                if (typeof vditorInstance.setMode === 'function') {
+                    if (['log', 'txt', 'conf', 'ini', 'json'].includes(extension)) {
+                        vditorInstance.setMode('sv');
+                    } else {
+                        vditorInstance.setMode('wysiwyg');
+                    }
                 }
 
+                updateStatusText('已打开: ' + fileName + ' (' + relativePath + ')');
+                renderTree();
             } catch (err) {
-                console.log('用户取消或读取失败:', err);
+                console.error('打开文件失败:', err);
+                updateStatusText('❌ 打开文件失败: ' + err.message, '#fef0f0', '#f56c6c');
             }
         }
 
-        // 🛡️ 机制二：自动/手动保存到硬盘文件
-        // isAuto: true 表示是系统后台偷偷保存的，不需要弹窗打扰用户
-        async function saveLocalFile(isAuto = false) {
-            if (!activeFileHandle) {
-                // 如果是新文件且是自动保存触发的，先不打扰用户弹窗
-                if (isAuto) return; 
-                
-                // 如果是用户主动按 Ctrl+S，则提示另存为
-                try {
-                    activeFileHandle = await window.showSaveFilePicker({
-                        suggestedName: '未命名文档.txt',
-                        types: [{ description: '文本文件', accept: { 'text/plain': ['.txt'] } }]
-                    });
-                } catch (err) { return; }
+        // ===== Save Current File =====
+        async function saveCurrentFile() {
+            if (!activeFilePath) {
+                updateStatusText('⚠️ 没有打开的文件可以保存', '#fef0f0', '#f56c6c');
+                return;
             }
 
             try {
-                const writable = await activeFileHandle.createWritable();
-                const currentContent = vditorInstance.getValue();
-                await writable.write(currentContent);
-                await writable.close();
-                
-                const file = await activeFileHandle.getFile();
-                if (isAuto) {
-                    // 自动保存成功：在状态栏做一个小提示，不弹窗
-                    updateStatusText(`已载入: ${file.name} (🕒 ${new Date().toLocaleTimeString()} 已自动同步到硬盘)`, "#e1f3d8", "#67c23a");
-                } else {
-                    // 手动保存成功：显眼提示
-                    updateStatusText("✅ 硬盘文件已原位更新并保存！", "#e1f3d8", "#67c23a", true, `已载入: ${file.name}`);
-                }
+                const content = vditorInstance.getValue();
+                await saveFile(activeFilePath, content);
+                lastSavedContent = content;
+                isDirty = false;
+                updateStatusText('✅ 已保存: ' + activeFileHandleName + ' (' + new Date().toLocaleTimeString() + ')', '#e1f3d8', '#67c23a');
             } catch (err) {
-                // 自动保存如果因为没授权而失败，不弹大框，仅在状态栏提示
-                if (isAuto) {
-                    updateStatusText(`⚠️ 自动保存等待授权中...请手动点击上方保存或修改文件`, "#fef0f0", "#f56c6c");
-                } else {
-                    alert('保存失败，请点击允许浏览器修改文件的权限: ' + err.message);
-                }
+                console.error('保存文件失败:', err);
+                updateStatusText('❌ 保存失败: ' + err.message, '#fef0f0', '#f56c6c');
             }
         }
 
-        // 开启定时器：每 15 秒检测并尝试同步到硬盘
-        function startAutoSaveTimer() {
-            if (autoSaveTimer) clearInterval(autoSaveTimer);
-            autoSaveTimer = setInterval(() => {
-                saveLocalFile(true); 
-            }, 15000); // 15000 毫秒 = 15 秒
+        // ===== Create New File =====
+        async function createNewFile(parentPath) {
+            const name = prompt('输入文件名:');
+            if (!name || !name.trim()) return;
+            const basePath = parentPath || (fileTreeData ? fileTreeData.path : '/文档');
+            const newPath = basePath + '/' + name.trim();
+            try {
+                await apiCreateFile(newPath);
+                await refreshTree();
+                updateStatusText('✅ 已创建文件: ' + name.trim(), '#e1f3d8', '#67c23a');
+            } catch (err) {
+                updateStatusText('❌ 创建文件失败: ' + err.message, '#fef0f0', '#f56c6c');
+            }
         }
 
-        // 辅助函数：更新状态栏文字与样式
-        function updateStatusText(text, bgColor = "#f4f4f5", textColor = "#909399", temp = false, revertText = "") {
+        // ===== Create New Folder =====
+        async function createNewFolder(parentPath) {
+            const name = prompt('输入文件夹名:');
+            if (!name || !name.trim()) return;
+            const basePath = parentPath || (fileTreeData ? fileTreeData.path : '/文档');
+            const newPath = basePath + '/' + name.trim();
+            try {
+                await apiMkdir(newPath);
+                await refreshTree();
+                updateStatusText('✅ 已创建文件夹: ' + name.trim(), '#e1f3d8', '#67c23a');
+            } catch (err) {
+                updateStatusText('❌ 创建文件夹失败: ' + err.message, '#fef0f0', '#f56c6c');
+            }
+        }
+
+        // ===== Rename =====
+        async function renameNode(targetPath) {
+            const node = findNodeByPath(fileTreeData, targetPath);
+            if (!node) return;
+            const oldName = node.name;
+            const newName = prompt('输入新名称:', oldName);
+            if (!newName || !newName.trim() || newName.trim() === oldName) return;
+            try {
+                await apiRename(targetPath, newName.trim());
+                // If renaming the currently open file, update the path
+                if (activeFilePath === targetPath) {
+                    const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
+                    activeFilePath = parentPath + '/' + newName.trim();
+                    activeFileHandleName = newName.trim();
+                }
+                await refreshTree();
+                updateStatusText('✅ 已重命名: ' + oldName + ' → ' + newName.trim(), '#e1f3d8', '#67c23a');
+            } catch (err) {
+                updateStatusText('❌ 重命名失败: ' + err.message, '#fef0f0', '#f56c6c');
+            }
+        }
+
+        // ===== Delete =====
+        async function deleteNode(targetPath) {
+            const node = findNodeByPath(fileTreeData, targetPath);
+            if (!node) return;
+            const label = node.type === 'directory' ? '文件夹' : '文件';
+            if (!confirm('确定删除' + label + ' "' + node.name + '"？\n此操作不可恢复！')) return;
+            try {
+                await apiDelete(targetPath);
+                // If deleting the currently open file, clear editor
+                if (activeFilePath === targetPath || (activeFilePath && activeFilePath.startsWith(targetPath + '/'))) {
+                    activeFilePath = null;
+                    activeFileHandleName = null;
+                    lastSavedContent = '';
+                    isDirty = false;
+                    vditorInstance.setValue('');
+                    updateStatusText('📁 ' + label + '已删除: ' + node.name);
+                }
+                await refreshTree();
+                updateStatusText('✅ 已删除' + label + ': ' + node.name, '#e1f3d8', '#67c23a');
+            } catch (err) {
+                updateStatusText('❌ 删除失败: ' + err.message, '#fef0f0', '#f56c6c');
+            }
+        }
+
+        // ===== Context Menu =====
+        function showContextMenu(e, targetPath, targetType) {
+            e.preventDefault();
+            contextMenuTarget = { path: targetPath, type: targetType };
+            const menu = document.getElementById('context-menu');
+
+            let html = '';
+            if (targetType === 'directory') {
+                html += '<div class="menu-item" data-action="new-file">📄 新建文件</div>';
+                html += '<div class="menu-item" data-action="new-folder">📁 新建文件夹</div>';
+                html += '<div class="menu-divider"></div>';
+                html += '<div class="menu-item" data-action="rename">✏️ 重命名</div>';
+                html += '<div class="menu-divider"></div>';
+                html += '<div class="menu-item danger" data-action="delete">🗑️ 删除</div>';
+            } else if (targetType === 'file') {
+                html += '<div class="menu-item" data-action="rename">✏️ 重命名</div>';
+                html += '<div class="menu-divider"></div>';
+                html += '<div class="menu-item danger" data-action="delete">🗑️ 删除</div>';
+            } else {
+                // Clicked on tree-container background
+                html += '<div class="menu-item" data-action="new-file">📄 新建文件</div>';
+                html += '<div class="menu-item" data-action="new-folder">📁 新建文件夹</div>';
+            }
+
+            menu.innerHTML = html;
+            menu.style.display = 'block';
+            menu.style.left = e.clientX + 'px';
+            menu.style.top = e.clientY + 'px';
+
+            // Keep menu within viewport
+            const rect = menu.getBoundingClientRect();
+            if (rect.bottom > window.innerHeight) {
+                menu.style.top = (e.clientY - rect.height) + 'px';
+            }
+            if (rect.right > window.innerWidth) {
+                menu.style.left = (e.clientX - rect.width) + 'px';
+            }
+        }
+
+        function hideContextMenu() {
+            document.getElementById('context-menu').style.display = 'none';
+            contextMenuTarget = null;
+        }
+
+        // Context menu click handler
+        document.getElementById('context-menu').addEventListener('click', async (e) => {
+            const item = e.target.closest('.menu-item');
+            if (!item || !contextMenuTarget) return;
+            const action = item.dataset.action;
+            hideContextMenu();
+
+            const targetPath = contextMenuTarget.path;
+            const targetType = contextMenuTarget.type;
+
+            if (action === 'new-file') {
+                await createNewFile(targetType === 'directory' ? targetPath : null);
+            } else if (action === 'new-folder') {
+                await createNewFolder(targetType === 'directory' ? targetPath : null);
+            } else if (action === 'rename') {
+                await renameNode(targetPath);
+            } else if (action === 'delete') {
+                await deleteNode(targetPath);
+            }
+        });
+
+        // Hide context menu on outside click
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('#context-menu')) {
+                hideContextMenu();
+            }
+        });
+
+        // ===== Status Bar Helper =====
+        function updateStatusText(text, bgColor = '#f4f4f5', textColor = '#909399') {
             const statusTag = document.getElementById('file-status');
             statusTag.innerText = text;
             statusTag.style.background = bgColor;
             statusTag.style.color = textColor;
-            
-            if (temp) {
-                setTimeout(() => {
-                    statusTag.innerText = revertText;
-                    statusTag.style.background = "#f4f4f5";
-                    statusTag.style.color = "#909399";
-                }, 2000);
+        }
+
+        // ===== Theme Switch =====
+        function switchTheme() {
+            isDarkTheme = !isDarkTheme;
+            if (isDarkTheme) {
+                document.body.classList.add('dark-theme');
+                vditorInstance.setTheme('dark', 'dark', 'github-dark');
+            } else {
+                document.body.classList.remove('dark-theme');
+                vditorInstance.setTheme('classic', 'light', 'github');
             }
         }
 
-        // 主题切换
-        function switchTheme() {
-            isDarkTheme = !isDarkTheme;
-            if(isDarkTheme) {
-                vditorInstance.setTheme('dark', 'dark', 'github-dark');
-                document.body.style.backgroundColor = '#1e1e1e';
-                document.querySelector('.app-bar').style.background = '#252526';
-            } else {
-                vditorInstance.setTheme('classic', 'light', 'github');
-                document.body.style.backgroundColor = '#f5f6f7';
-                document.querySelector('.app-bar').style.background = '#ffffff';
+        // ===== Utility =====
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ===== Dirty Tracking =====
+        function markDirty() {
+            if (activeFilePath && !isDirty) {
+                isDirty = true;
+                updateStatusText('已修改: ' + activeFileHandleName + ' (未保存)', '#fdf6ec', '#e6a23c');
             }
         }
+
+        // ===== Auto-save Timer =====
+        function startAutoSave() {
+            if (autoSaveTimer) clearInterval(autoSaveTimer);
+            autoSaveTimer = setInterval(async () => {
+                if (!isDirty || !activeFilePath) return;
+                try {
+                    const content = vditorInstance.getValue();
+                    if (content === lastSavedContent) { isDirty = false; return; }
+                    await saveFile(activeFilePath, content);
+                    lastSavedContent = content;
+                    isDirty = false;
+                    updateStatusText('已自动保存: ' + activeFileHandleName + ' (' + new Date().toLocaleTimeString() + ')', '#e1f3d8', '#67c23a');
+                } catch (e) {
+                    // Silently fail, user can manually save
+                }
+            }, 10000);
+        }
+
+        // ===== Auto-refresh Timer =====
+        function startAutoRefresh() {
+            if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+            autoRefreshTimer = setInterval(async () => {
+                try {
+                    const response = await fetch('/api/tree');
+                    if (!response.ok) return;
+                    const newTree = await response.json();
+                    // Only refresh if tree actually changed
+                    if (JSON.stringify(newTree) !== JSON.stringify(fileTreeData)) {
+                        // Preserve expanded state
+                        const oldExpanded = new Set(expandedPaths);
+                        fileTreeData = newTree;
+                        expandedPaths = oldExpanded;
+                        // Re-add root if missing
+                        if (fileTreeData && !expandedPaths.has(fileTreeData.path)) {
+                            expandedPaths.add(fileTreeData.path);
+                        }
+                        renderTree();
+                    }
+                } catch (e) { /* silent */ }
+            }, 5000);
+        }
+
+        // ===== Auto-load on startup =====
+        loadFileTree();
+        startAutoSave();
+        startAutoRefresh();
     </script>
 </body>
 </html>

@@ -1,0 +1,9 @@
+{
+  "digits": 3,
+  "operations": [
+    "×",
+    "÷"
+  ],
+  "problem_count": 10,
+  "time_per_question": 15
+}
