@@ -25,14 +25,16 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "calc_config.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "calc_history.json")
+ERROR_FILE = os.path.join(BASE_DIR, "calc_errors.json")
 
 # ── 默认配置 ───────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "digits_a": 2,              # 左操作数位数: 1~5
-    "digits_b": 2,              # 右操作数位数: 1~5
+    "digits_a": 2,              # 左操作数位数: 1~5 或 [min,max]
+    "digits_b": 2,              # 右操作数位数: 1~5 或 [min,max]
     "operations": ["+", "-", "×", "÷"],  # 启用的运算符
     "problem_count": 10,        # 每轮题数: 5~50
     "time_per_question": 30,    # 每题限时(秒): 5~120
+    "decimal_places": 0,        # 小数位数: 0(整数) | 1 | 2
 }
 
 OPS_SYMBOL = {"+": "+", "-": "-", "×": "×", "÷": "÷"}  # 显示用
@@ -71,99 +73,169 @@ def set_console_title(text):
     sys.stdout.write(f"\033]0;{text}\007")
     sys.stdout.flush()
 
+def resolve_digits(spec):
+    """解析位数配置：int 为固定，list [min,max] 为随机范围"""
+    if isinstance(spec, list) and len(spec) == 2:
+        return random.randint(spec[0], spec[1])
+    return spec
+
+def digits_display(spec):
+    """位数配置的可读字符串"""
+    if isinstance(spec, list) and len(spec) == 2:
+        return f"{spec[0]}~{spec[1]}位"
+    return f"{spec}位"
+
+def int_range(digits, scale):
+    """返回缩放后的整数范围 [lo, hi]"""
+    lo = (10 ** (digits - 1) if digits > 1 else 1) * scale
+    hi = ((10 ** digits) - 1) * scale + (scale - 1)
+    return lo, hi
+
+def fmt_dec(val_int, d):
+    """将内部缩放整数格式化为小数字符串"""
+    if d == 0:
+        return str(val_int)
+    neg = val_int < 0
+    s = str(abs(val_int))
+    s = s.zfill(d + 1)
+    int_part = s[:-d] or "0"
+    dec_part = s[-d:]
+    sign = "-" if neg else ""
+    return f"{sign}{int_part}.{dec_part}"
+
+def parse_decimal_input(answer_str, d):
+    """解析用户输入：支持 '12.34', '.5', '12', '-3.14' 等，返回缩放整数或 None"""
+    s = answer_str.strip()
+    if not s:
+        return None
+    neg = s.startswith("-")
+    if neg:
+        s = s[1:]
+    if "." in s:
+        parts = s.split(".")
+        if len(parts) != 2:
+            return None
+        int_s, dec_s = parts
+        dec_s = (dec_s + "0" * d)[:d]  # 补零或截断
+    else:
+        int_s, dec_s = s, "0" * d
+    # 去掉前导零（但保留至少一位数字）
+    int_s = int_s.lstrip("0") or "0"
+    try:
+        val = int(int_s + dec_s)
+        return -val if neg else val
+    except ValueError:
+        return None
+
 # ── 题目生成 ───────────────────────────────────────────
 
-def generate_problem(digits_a, digits_b, op):
+def generate_problem(digits_a, digits_b, op, decimal_places=0):
     """
-    生成一道速算题。左右操作数各自独立的位数范围。
-    返回 (num1, num2, op_symbol, expected_answer)
+    生成一道速算题。内部全部使用缩放整数（×10^d）。
+    统一返回 5 元组:
+      (num1_int, num2_int, op_symbol, answer_int, answer_decimal_places)
+    其中 answer_decimal_places 用于格式化答案和解析用户输入。
     """
-    lo_a = 10 ** (digits_a - 1) if digits_a > 1 else 1
-    hi_a = (10 ** digits_a) - 1
-    lo_b = 10 ** (digits_b - 1) if digits_b > 1 else 1
-    hi_b = (10 ** digits_b) - 1
+    da = resolve_digits(digits_a)
+    db = resolve_digits(digits_b)
+    scale = 10 ** decimal_places
+    ans_d = decimal_places  # 默认答案小数位
 
-    def retry_if_equal(get_a, get_b, max_tries=8):
-        """通用防重复：若 a==b 则重抽，最多 max_tries 次"""
+    lo_a, hi_a = int_range(da, scale)
+    lo_b, hi_b = int_range(db, scale)
+
+    def retry_if_equal(get_a, get_b, hi_b_val, max_tries=8):
         for _ in range(max_tries):
-            a_val = get_a()
-            b_val = get_b()
-            if a_val != b_val:
-                return a_val, b_val
-        # 最终还是相同的话，把 b 微调一下
-        a_val = get_a()
-        b_val = get_b()
-        if a_val == b_val:
-            b_val = b_val + 1 if b_val < hi_b else b_val - 1
-        return a_val, b_val
+            av = get_a()
+            bv = get_b()
+            if av != bv:
+                return av, bv
+        av = get_a()
+        bv = get_b()
+        if av == bv:
+            bv = bv + 1 if bv < hi_b_val else bv - 1
+        return av, bv
 
     if op == "+":
         a, b = retry_if_equal(
             lambda: random.randint(lo_a, hi_a),
-            lambda: random.randint(lo_b, hi_b),
+            lambda: random.randint(lo_b, hi_b), hi_b,
         )
-        return a, b, OPS_SYMBOL[op], a + b
+        return a, b, OPS_SYMBOL[op], a + b, ans_d
 
     elif op == "-":
-        # 减法：保证 a > b，且差不小于阈值（避免太简单）
         min_diff = max(lo_a, lo_b) // 3
         for _ in range(10):
             a = random.randint(lo_a, hi_a)
             b = random.randint(lo_b, hi_b)
             if a > b and (a - b) >= min_diff:
-                return a, b, OPS_SYMBOL[op], a - b
-        # 兜底：先定 b，再从保证 a > b 的范围中抽 a
+                return a, b, OPS_SYMBOL[op], a - b, ans_d
         b = random.randint(lo_b, hi_b)
         a_lo = max(lo_a, b + max(min_diff, 1))
         if a_lo > hi_a:
-            # b 太大，换一个小一点的 b
             b = random.randint(lo_b, max(lo_b, hi_a - min_diff - 1)) if hi_a - min_diff - 1 >= lo_b else lo_b
             a_lo = max(lo_a, b + max(min_diff, 1))
         a = random.randint(a_lo, hi_a) if a_lo <= hi_a else hi_a
         if a <= b:
             a = b + max(min_diff, 1)
-        return a, b, OPS_SYMBOL[op], a - b
+        return a, b, OPS_SYMBOL[op], a - b, ans_d
 
     elif op == "×":
-        # 乘法：各自独立范围（不再硬编码限死）
-        a, b = retry_if_equal(
-            lambda: random.randint(lo_a, hi_a),
-            lambda: random.randint(lo_b, hi_b),
-        )
-        return a, b, OPS_SYMBOL[op], a * b
+        if decimal_places > 0 and random.random() < 0.5:
+            # 右数为整数（无缩放）
+            lo_b_int, hi_b_int = int_range(db, 1)
+            b = random.randint(lo_b_int, hi_b_int)
+            a = random.randint(lo_a, hi_a)
+            if a == b:
+                b = b + 1 if b < hi_b_int else b - 1
+            return a, b, OPS_SYMBOL[op], a * b, ans_d
+        else:
+            # 右数同为 d 位小数 → 答案 2d 位小数
+            a, b = retry_if_equal(
+                lambda: random.randint(lo_a, hi_a),
+                lambda: random.randint(lo_b, hi_b), hi_b,
+            )
+            return a, b, OPS_SYMBOL[op], a * b, ans_d * 2
 
     elif op == "÷":
-        # 除法：b 从右数范围取，商从左数范围约束；避免商=1
+        # 右操作数始终为整数（无缩放），答案 d 位小数
+        lo_b_int, hi_b_int = int_range(db, 1)
         for _ in range(30):
-            b = random.randint(max(lo_b, 2), hi_b)  # 除数至少 2
-            q_lo = max((lo_a + b - 1) // b, 2)      # ceil(lo_a/b)，商至少 2
-            q_hi = hi_a // b
-            if q_lo <= q_hi:
-                quotient = random.randint(q_lo, q_hi)
-                a = b * quotient
-                if lo_a <= a <= hi_a:
-                    return a, b, OPS_SYMBOL[op], quotient
-        # 兜底：降低 b 的上限，保证能得到合法 a
-        for b in range(min(hi_b, hi_a // 2), 1, -1):
+            b = random.randint(max(lo_b_int, 2), hi_b_int)
             q_lo = max((lo_a + b - 1) // b, 2)
             q_hi = hi_a // b
             if q_lo <= q_hi:
                 quotient = random.randint(q_lo, q_hi)
                 a = b * quotient
                 if lo_a <= a <= hi_a:
-                    return a, b, OPS_SYMBOL[op], quotient
-        # 最终兜底
-        b = max(lo_b, 2)
+                    return a, b, OPS_SYMBOL[op], quotient, ans_d
+        for b in range(min(hi_b_int, hi_a // 2), 1, -1):
+            q_lo = max((lo_a + b - 1) // b, 2)
+            q_hi = hi_a // b
+            if q_lo <= q_hi:
+                quotient = random.randint(q_lo, q_hi)
+                a = b * quotient
+                if lo_a <= a <= hi_a:
+                    return a, b, OPS_SYMBOL[op], quotient, ans_d
+        b = max(lo_b_int, 2)
         quotient = max((lo_a + b - 1) // b, 2)
         a = b * quotient
-        return a, b, OPS_SYMBOL[op], quotient
+        return a, b, OPS_SYMBOL[op], quotient, ans_d
 
-    return 0, 0, "?", 0
+    return 0, 0, "?", 0, 0
 
 
-def format_problem(num1, num2, op_sym):
-    """格式化题目显示"""
-    return f"{num1} {op_sym} {num2} = ?"
+def format_problem(num1, num2, op_sym, dec_places=0, right_dec_places=None):
+    """
+    格式化题目显示。
+    dec_places: 左操作数小数位数
+    right_dec_places: 右操作数小数位数（None=与左相同; 0=整数）
+    """
+    d = dec_places
+    rd = d if right_dec_places is None else right_dec_places
+    if d == 0 and rd == 0:
+        return f"{num1} {op_sym} {num2} = ?"
+    return f"{fmt_dec(num1, d)} {op_sym} {fmt_dec(num2, rd)} = ?"
 
 
 # ── 带倒计时的输入 ─────────────────────────────────────
@@ -236,8 +308,11 @@ def input_with_timer(timeout_sec):
             elif ch == b"\x03":
                 raise KeyboardInterrupt
 
-            # 负号 / 数字
-            elif ch == b"-" or ch == b"+" or (b"0" <= ch <= b"9"):
+            # 负号 / 小数点 / 数字
+            elif ch == b"-" or ch == b"+" or ch == b"." or (b"0" <= ch <= b"9"):
+                # 只允许一个小数点
+                if ch == b"." and b"." in answer_chars:
+                    continue
                 answer_chars.append(ch.decode("utf-8", errors="replace"))
                 sys.stdout.write(ch.decode("utf-8", errors="replace"))
                 sys.stdout.flush()
@@ -248,20 +323,27 @@ def input_with_timer(timeout_sec):
 
 # ── 单题练习 ───────────────────────────────────────────
 
-def play_one_problem(num1, num2, op_sym, expected, timeout_sec, idx, total):
+def play_one_problem(num1, num2, op_sym, expected, timeout_sec, idx, total,
+                     dec_places=0, ans_dec_places=0, right_dec_places=None,
+                     is_error_retry=False):
     """
     练习一道题。返回结果字典。
+    dec_places: 左操作数小数位数
+    ans_dec_places: 答案小数位数
+    right_dec_places: 右操作数小数位数（None=同左, 0=整数）
+    is_error_retry: 是否为错题重练模式
     """
-    # 设置窗口标题
-    set_console_title(f"速算练习 - 第 {idx}/{total} 题")
+    label = "错题重练" if is_error_retry else "速算练习"
+    set_console_title(f"{label} - 第 {idx}/{total} 题")
 
     # 打印题目区
+    problem_text = format_problem(num1, num2, op_sym, dec_places, right_dec_places)
     print()
     print("  ┌" + "─" * 42 + "┐")
-    print(f"  │  第 {idx}/{total} 题" + " " * 27 + "│")
+    tag = "  错题重练" if is_error_retry else "  速算练习"
+    print(f"  │{tag} 第 {idx}/{total} 题" + " " * (27 - len(tag) + 4) + "│")
     print("  ├" + "─" * 42 + "┤")
     print(f"  │" + " " * 42 + "│")
-    problem_text = format_problem(num1, num2, op_sym)
     padding = (38 - len(problem_text)) // 2
     print(f"  │  " + " " * padding + problem_text + " " * (38 - padding - len(problem_text)) + "│")
     print(f"  │" + " " * 42 + "│")
@@ -270,50 +352,163 @@ def play_one_problem(num1, num2, op_sym, expected, timeout_sec, idx, total):
     # 读取答案（带倒计时）
     answer_str, is_timeout, elapsed = input_with_timer(timeout_sec)
 
-    # 判定结果
+    # 判定结果（使用小数解析）
     if is_timeout:
         correct = False
-        user_answer = None
+        user_answer_int = None
     else:
-        try:
-            user_answer = int(answer_str.strip())
-            correct = (user_answer == expected)
-        except ValueError:
-            user_answer = None
-            correct = False
+        user_answer_int = parse_decimal_input(answer_str, ans_dec_places)
+        correct = (user_answer_int is not None and user_answer_int == expected)
 
-    return {
+    result = {
         "num1": num1,
         "num2": num2,
         "op": op_sym,
         "expected": expected,
-        "user_answer": user_answer,
+        "user_answer": user_answer_int,
         "answer_str": answer_str,
         "correct": correct,
         "timeout": is_timeout,
         "elapsed_sec": round(elapsed, 2),
+        "dec_places": dec_places,
+        "ans_dec_places": ans_dec_places,
+        "right_dec_places": right_dec_places,
     }
+    return result
 
 
 # ── 反馈显示 ───────────────────────────────────────────
 
 def show_feedback(result):
     """显示单题反馈"""
+    ans_d = result.get("ans_dec_places", 0)
+    exp_disp = fmt_dec(result["expected"], ans_d)
     if result["timeout"]:
-        print("  ❌ 超时未答！")
-        print(f"  正确答案: {result['expected']}")
+        print(f"  ❌ 超时未答！")
+        print(f"  正确答案: {exp_disp}")
     elif result["correct"]:
         elapsed = result["elapsed_sec"]
         print(f"  ✅ 正确！ ({elapsed:.1f}s)")
     else:
+        user_disp = fmt_dec(result["user_answer"], ans_d) if result["user_answer"] is not None else result["answer_str"]
         print(f"  ❌ 错误！")
-        print(f"  你的答案: {result['user_answer']}")
-        print(f"  正确答案: {result['expected']}")
+        print(f"  你的答案: {user_disp}")
+        print(f"  正确答案: {exp_disp}")
 
     print()
     print("  按任意键继续...")
 
     # 等待按键
+    while msvcrt.kbhit():
+        msvcrt.getch()
+    msvcrt.getch()
+
+
+# ── 错题本 ─────────────────────────────────────────────
+
+def add_to_error_book(result, config):
+    """将答错/超时的题目加入错题本，自动查重"""
+    errors = load_json(ERROR_FILE, [])
+    # 查重：相同 (num1, num2, op, decimal_places) 视为同一题
+    key = (result["num1"], result["num2"], result["op"],
+           result.get("dec_places", 0))
+    for e in errors:
+        ek = (e["num1"], e["num2"], e["op"], e.get("decimal_places", 0))
+        if ek == key and not e.get("solved", False):
+            e["retry_count"] = e.get("retry_count", 0) + 1
+            e["last_retry"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_json(ERROR_FILE, errors)
+            return
+    # 新错题
+    errors.append({
+        "num1": result["num1"],
+        "num2": result["num2"],
+        "op": result["op"],
+        "expected": result["expected"],
+        "user_answer": result.get("answer_str", ""),
+        "timeout": result["timeout"],
+        "time_limit": config["time_per_question"],
+        "digits_a": config.get("digits_a", 2),
+        "digits_b": config.get("digits_b", 2),
+        "decimal_places": result.get("dec_places", 0),
+        "ans_dec_places": result.get("ans_dec_places", 0),
+        "right_dec_places": result.get("right_dec_places"),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "retry_count": 0,
+        "solved": False,
+    })
+    save_json(ERROR_FILE, errors)
+
+
+def mark_error_solved(error_entry):
+    """标记错题已解决"""
+    errors = load_json(ERROR_FILE, [])
+    key = (error_entry["num1"], error_entry["num2"], error_entry["op"],
+           error_entry.get("decimal_places", 0))
+    for e in errors:
+        ek = (e["num1"], e["num2"], e["op"], e.get("decimal_places", 0))
+        if ek == key:
+            e["solved"] = True
+            save_json(ERROR_FILE, errors)
+            return
+
+
+def increment_error_retry(error_entry):
+    """增加错题重试次数"""
+    errors = load_json(ERROR_FILE, [])
+    key = (error_entry["num1"], error_entry["num2"], error_entry["op"],
+           error_entry.get("decimal_places", 0))
+    for e in errors:
+        ek = (e["num1"], e["num2"], e["op"], e.get("decimal_places", 0))
+        if ek == key:
+            e["retry_count"] = e.get("retry_count", 0) + 1
+            e["last_retry"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_json(ERROR_FILE, errors)
+            return
+
+
+def get_unsolved_error_count():
+    """获取未解决的错题数"""
+    errors = load_json(ERROR_FILE, [])
+    return sum(1 for e in errors if not e.get("solved", False))
+
+
+def clear_solved_errors():
+    """清除已解决的错题"""
+    errors = load_json(ERROR_FILE, [])
+    errors = [e for e in errors if not e.get("solved", False)]
+    save_json(ERROR_FILE, errors)
+
+
+def show_error_summary(results, total_time):
+    """错题重练总结"""
+    clear_screen()
+    total = len(results)
+    correct_count = sum(1 for r in results if r["correct"])
+    solved = correct_count
+    remaining = total - solved
+    accuracy = correct_count / total * 100 if total > 0 else 0
+
+    print()
+    print("  ╔" + "═" * 42 + "╗")
+    print("  ║" + " " * 12 + "错题重练 结 束" + " " * 17 + "║")
+    print("  ╠" + "═" * 42 + "╣")
+    print(f"  ║  总题数: {total:<4}                         ║")
+    print(f"  ║  已解决: {solved:<4}  ✅                    ║")
+    print(f"  ║  未解决: {remaining:<4}  ❌                    ║")
+    print(f"  ║  正确率: {accuracy:.1f}%                       ║")
+    print(f"  ║  总用时: {total_time:.0f}s                      ║")
+    print("  ╚" + "═" * 42 + "╝")
+    print()
+
+    unsolved = get_unsolved_error_count()
+    if unsolved > 0:
+        print(f"  还有 {unsolved} 道错题待练习。")
+    else:
+        print(f"  全部错题已解决！🎉")
+    print()
+
+    print("  按任意键返回菜单...")
     while msvcrt.kbhit():
         msvcrt.getch()
     msvcrt.getch()
@@ -451,15 +646,18 @@ def settings_menu(config):
         print("  ╠" + "═" * 42 + "╣")
         da = config.get("digits_a", config.get("digits", 2))
         db = config.get("digits_b", config.get("digits", 2))
-        print(f"  ║  [1] 位数        →  {da} 位 vs {db} 位          ║")
+        dp = config.get("decimal_places", 0)
+        dec_label = ["纯整数", "1 位小数", "2 位小数"][dp] if dp <= 2 else f"{dp}位小数"
+        print(f"  ║  [1] 位数        →  {digits_display(da)} vs {digits_display(db):<8s}     ║")
         print(f"  ║  [2] 运算符      →  {ops_display:<20s}   ║")
         print(f"  ║  [3] 题目数量    →  {config['problem_count']:2d} 题              ║")
         print(f"  ║  [4] 每题限时    →  {config['time_per_question']:3d} 秒            ║")
+        print(f"  ║  [5] 小数位数    →  {dec_label:<20s}   ║")
         print("  ║                                          ║")
         print("  ║  [0] 返回主菜单                           ║")
         print("  ╚" + "═" * 42 + "╝")
         print()
-        print("  请选择 [0-4]: ", end="", flush=True)
+        print("  请选择 [0-5]: ", end="", flush=True)
 
         ch = msvcrt.getch().decode("utf-8", errors="replace")
         print(ch)
@@ -480,40 +678,82 @@ def settings_menu(config):
             config["time_per_question"] = _input_int(
                 "每题限时 / 秒 (5~120): ", 5, 120, config["time_per_question"]
             )
+        elif ch == "5":
+            config["decimal_places"] = _choose_decimal_places()
 
     save_json(CONFIG_FILE, config)
 
 
 def _choose_two_digits(config):
-    """分别选择左数和右数的位数，支持快捷预设"""
+    """分别选择左数和右数的位数，支持固定/随机/自定义"""
     da = config.get("digits_a", config.get("digits", 2))
     db = config.get("digits_b", config.get("digits", 2))
 
     print()
-    print("  ┌" + "─" * 38 + "┐")
-    print(f"  │  当前: 左数 {da} 位  vs  右数 {db} 位" + " " * (13 - len(str(da)) - len(str(db))) + "│")
-    print("  ├" + "─" * 38 + "┤")
+    print("  ┌" + "─" * 40 + "┐")
+    print(f"  │  当前: 左数 {digits_display(da):<8s}  右数 {digits_display(db):<8s} │")
+    print("  ├" + "─" * 40 + "┤")
     print("  │  快捷预设:                              │")
-    print("  │  1 — 相同位数 (与左数一致)              │")
-    print("  │  2 — 2位 vs 1位  (如 23 + 8)           │")
-    print("  │  3 — 3位 vs 2位  (如 345 + 67)         │")
-    print("  │  4 — 4位 vs 2位  (如 5678 ÷ 23)        │")
-    print("  │  5 — 自定义                             │")
-    print("  └" + "─" * 38 + "┘")
+    print("  │  1 — 相同位数                            │")
+    print("  │  2 — 2位  vs 1位  (如 23 + 8)           │")
+    print("  │  3 — 3位  vs 2位  (如 345 + 67)         │")
+    print("  │  4 — 4位  vs 2位  (如 5678 / 23)        │")
+    print("  │  5 — 随机 1~3 位（相同）                 │")
+    print("  │  6 — 随机 2~4 位（相同）                 │")
+    print("  │  7 — 自定义                              │")
+    print("  └" + "─" * 40 + "┘")
     print()
 
-    presets = {"1": (da, da), "2": (2, 1), "3": (3, 2), "4": (4, 2)}
+    presets = {
+        "1": (da if isinstance(da, int) else da[0], da if isinstance(da, int) else da[0]),
+        "2": (2, 1),
+        "3": (3, 2),
+        "4": (4, 2),
+        "5": ([1, 3], [1, 3]),
+        "6": ([2, 4], [2, 4]),
+    }
     while True:
-        print("  请选择 (1~5): ", end="", flush=True)
+        print("  请选择 (1~7): ", end="", flush=True)
         ch = msvcrt.getch().decode("utf-8", errors="replace")
         print(ch)
         if ch in presets:
             return presets[ch]
-        elif ch == "5":
-            da = _input_int("  左数位数 (1~5): ", 1, 5, da)
-            db = _input_int("  右数位数 (1~5): ", 1, 5, db)
+        elif ch == "7":
+            print("\n  左数设置:")
+            da = _choose_one_digit_spec(da)
+            print("  右数设置:")
+            db = _choose_one_digit_spec(db)
             return da, db
         print("  无效选项，请重新选择")
+
+
+def _choose_one_digit_spec(current):
+    """选择单个操作数的位数规格：固定值或随机范围"""
+    cur_str = digits_display(current)
+    print(f"  当前: {cur_str}")
+    print("  1 — 固定位数")
+    print("  2 — 随机范围 (如 1~3)")
+    print("  请选择: ", end="", flush=True)
+    ch = msvcrt.getch().decode("utf-8", errors="replace")
+    print(ch)
+    if ch == "2":
+        lo = _input_int("  最小位数 (1~5): ", 1, 5, 1)
+        hi = _input_int("  最大位数 (1~5): ", lo, 5, 3)
+        return [lo, hi]
+    else:
+        if isinstance(current, list):
+            current = current[0]
+        return _input_int("  位数 (1~5): ", 1, 5, current if isinstance(current, int) else 2)
+
+
+def _choose_decimal_places():
+    """选择小数位数"""
+    print("\n  小数位数设置:")
+    print("  0 — 纯整数（无小数）")
+    print("  1 — 1 位小数（如 12.3）")
+    print("  2 — 2 位小数（如 12.34）")
+    print()
+    return _input_int("  请选择 (0~2): ", 0, 2, 0)
 
 
 def _choose_operations():
@@ -565,22 +805,38 @@ def _input_int(prompt, lo, hi, default):
 
 # ── 主练习流程 ─────────────────────────────────────────
 
-def run_practice(config):
-    """执行一轮练习"""
+def run_practice(config, error_problems=None):
+    """执行一轮练习。error_problems 不为 None 时进入错题重练模式。"""
     clear_screen()
 
-    digits_a = config.get("digits_a", config.get("digits", 2))
-    digits_b = config.get("digits_b", config.get("digits", 2))
-    ops = config["operations"]
-    count = config["problem_count"]
-    time_per_q = config["time_per_question"]
+    is_error_mode = error_problems is not None
+    if is_error_mode:
+        problems = error_problems
+        count = len(problems)
+        digits_a = config.get("digits_a", 2)
+        digits_b = config.get("digits_b", 2)
+        time_per_q = config["time_per_question"]
+    else:
+        digits_a = config.get("digits_a", config.get("digits", 2))
+        digits_b = config.get("digits_b", config.get("digits", 2))
+        ops = config["operations"]
+        count = config["problem_count"]
+        time_per_q = config["time_per_question"]
+
+    dec_places = config.get("decimal_places", 0)
+    ops_display = " ".join(OPS_SYMBOL.get(o, o) for o in config["operations"])
+    digits_a_disp = digits_display(digits_a)
+    digits_b_disp = digits_display(digits_b)
+    dec_info = f" 小数{dec_places}位" if dec_places > 0 else ""
 
     # 打印本轮设置
-    ops_display = " ".join(OPS_SYMBOL.get(o, o) for o in ops)
     print()
     print("  ╔" + "═" * 42 + "╗")
-    print(f"  ║  位数: {digits_a}位 vs {digits_b}位  |  运算: {ops_display:<10s}║")
-    print(f"  ║  题数: {count:2d}    |  每题限时: {time_per_q} 秒          ║")
+    if is_error_mode:
+        print(f"  ║  📝 错题重练 共 {count} 题                      ║")
+    else:
+        print(f"  ║  位数: {digits_a_disp} vs {digits_b_disp}  |  运算: {ops_display:<10s}║")
+        print(f"  ║  题数: {count:2d}    |  每题限时: {time_per_q}s{dec_info:<8s}║")
     print("  ╚" + "═" * 42 + "╝")
     print()
     print("  按任意键开始...")
@@ -594,24 +850,67 @@ def run_practice(config):
     for i in range(count):
         clear_screen()
 
-        # 随机选择运算符
-        op = random.choice(ops)
-        # 生成题目
-        num1, num2, op_sym, expected = generate_problem(digits_a, digits_b, op)
+        if is_error_mode:
+            prob = problems[i]
+            num1 = prob["num1"]
+            num2 = prob["num2"]
+            op_sym = OPS_SYMBOL.get(prob["op"], prob["op"])
+            expected = prob["expected"]
+            time_per_q = prob.get("time_limit", time_per_q)
+            d = prob.get("decimal_places", 0)
+            ad = prob.get("ans_dec_places", d)
+            rd = prob.get("right_dec_places")
+        else:
+            op = random.choice(ops)
+            num1, num2, op_sym, expected, ad = generate_problem(
+                digits_a, digits_b, op, dec_places)
+            d = dec_places
+            # 确定右操作数小数位数
+            if op in ("+", "-"):
+                rd = d
+            elif op == "÷":
+                rd = 0
+            elif op == "×":
+                # 右操作数是整数（无缩放）还是小数，用数值范围判断
+                rd = d  # 默认同精度
+                if d > 0:
+                    db_val = resolve_digits(digits_b)
+                    lo_nat = 10 ** (db_val - 1) if db_val > 1 else 1
+                    hi_nat = (10 ** db_val) - 1
+                    if lo_nat <= num2 <= hi_nat:
+                        rd = 0
 
         # 练习
-        result = play_one_problem(num1, num2, op_sym, expected, time_per_q,
-                                  idx=i + 1, total=count)
+        result = play_one_problem(
+            num1, num2, op_sym, expected, time_per_q,
+            idx=i + 1, total=count,
+            dec_places=d, ans_dec_places=ad, right_dec_places=rd,
+            is_error_retry=is_error_mode,
+        )
         results.append(result)
 
         # 反馈
         show_feedback(result)
 
+        # 错题本收集 / 重练标记
+        if is_error_mode:
+            # 错题重练：答对标记 solved
+            if result["correct"]:
+                mark_error_solved(problems[i])
+            else:
+                increment_error_retry(problems[i])
+        else:
+            # 普通练习：答错/超时 写入错题本
+            if not result["correct"]:
+                add_to_error_book(result, config)
+
     round_end = time.time()
     total_time = round_end - round_start
 
-    # 显示总结
-    show_summary(results, total_time, config)
+    if is_error_mode:
+        show_error_summary(results, total_time)
+    else:
+        show_summary(results, total_time, config)
 
 
 # ── 主菜单 ─────────────────────────────────────────────
@@ -634,23 +933,35 @@ def main_menu():
         ops_display = " ".join(OPS_SYMBOL.get(o, o) for o in config["operations"])
         da = config.get("digits_a", 2)
         db = config.get("digits_b", 2)
+        dp = config.get("decimal_places", 0)
+        da_disp = digits_display(da)
+        db_disp = digits_display(db)
+        dec_info = f" 小数{dp}位" if dp > 0 else ""
+
+        err_count = get_unsolved_error_count()
+        err_line = f"\n  ║   [5] 错题重练 ({err_count}题待练)                    ║" if err_count > 0 else ""
 
         print()
         print("  ╔" + "═" * 42 + "╗")
-        print("  ║" + " " * 3 + "⚡ 速 算 练 习 工 具 —        用 ⚡" + " " * 3 + "║")
+        print("  ║" + " " * 3 + "⚡ 速 算 练 习 工 具 — 行 测 专 用 ⚡" + " " * 3 + "║")
         print("  ╠" + "═" * 42 + "╣")
         print("  ║                                          ║")
-        print(f"  ║   当前设置: {da}位vs{db}位 | {ops_display:<10s} | {config['problem_count']:2d}题/{config['time_per_question']}s   ║")
+        print(f"  ║   {da_disp} vs {db_disp}{dec_info}  |  {ops_display:<10s}  |  {config['problem_count']:2d}题/{config['time_per_question']}s  ║")
         print("  ║                                          ║")
         print("  ║   [1] 开始练习                            ║")
         print("  ║   [2] 修改设置                            ║")
         print("  ║   [3] 历史成绩                            ║")
         print("  ║   [4] 使用说明                            ║")
+        if err_line:
+            print(err_line)
         print("  ║   [0] 退出                                ║")
         print("  ║                                          ║")
         print("  ╚" + "═" * 42 + "╝")
         print()
-        print("  请选择 [0-4]: ", end="", flush=True)
+        opts = "[0-4]"
+        if err_count > 0:
+            opts = "[0-5]"
+        print(f"  请选择 {opts}: ", end="", flush=True)
 
         ch = msvcrt.getch().decode("utf-8", errors="replace")
         print(ch)
@@ -669,6 +980,13 @@ def main_menu():
             show_history()
         elif ch == "4":
             show_help()
+        elif ch == "5" and err_count > 0:
+            errors = [e for e in load_json(ERROR_FILE, []) if not e.get("solved", False)]
+            if errors:
+                run_practice(config, error_problems=errors)
+            else:
+                print("  暂无待练错题！")
+                time.sleep(1)
 
 
 def show_help():
