@@ -402,17 +402,19 @@ def show_feedback(result):
     """显示单题反馈"""
     ans_d = result.get("ans_dec_places", 0)
     exp_disp = fmt_dec(result["expected"], ans_d)
+    elapsed = result["elapsed_sec"]
     if result["timeout"]:
         print(f"  ❌ 超时未答！")
         print(f"  正确答案: {exp_disp}")
+        print(f"  ⏱ 耗时 {elapsed:.1f}s")
     elif result["correct"]:
-        elapsed = result["elapsed_sec"]
         print(f"  ✅ 正确！ ({elapsed:.1f}s)")
     else:
         user_disp = fmt_dec(result["user_answer"], ans_d) if result["user_answer"] is not None else result["answer_str"]
         print(f"  ❌ 错误！")
         print(f"  你的答案: {user_disp}")
         print(f"  正确答案: {exp_disp}")
+        print(f"  ⏱ 耗时 {elapsed:.1f}s")
 
     print()
     print("  按任意键继续 (ESC 退出)...")

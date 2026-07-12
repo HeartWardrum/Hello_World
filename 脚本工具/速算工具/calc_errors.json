@@ -14,7 +14,7 @@
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:22",
     "retry_count": 1,
-    "solved": false,
+    "solved": true,
     "last_retry": "2026-07-10 17:23:42"
   },
   {
@@ -31,9 +31,9 @@
     "ans_dec_places": 0,
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:27",
-    "retry_count": 1,
+    "retry_count": 2,
     "solved": false,
-    "last_retry": "2026-07-10 17:23:45"
+    "last_retry": "2026-07-11 12:07:07"
   },
   {
     "num1": 224,
@@ -50,7 +50,7 @@
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:28",
     "retry_count": 1,
-    "solved": false,
+    "solved": true,
     "last_retry": "2026-07-10 17:23:45"
   },
   {
@@ -67,9 +67,9 @@
     "ans_dec_places": 0,
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:28",
-    "retry_count": 1,
+    "retry_count": 2,
     "solved": false,
-    "last_retry": "2026-07-10 17:23:45"
+    "last_retry": "2026-07-11 12:08:08"
   },
   {
     "num1": 921,
@@ -86,7 +86,7 @@
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:28",
     "retry_count": 1,
-    "solved": false,
+    "solved": true,
     "last_retry": "2026-07-10 17:23:45"
   },
   {
@@ -104,7 +104,7 @@
     "right_dec_places": 0,
     "timestamp": "2026-07-10 17:23:29",
     "retry_count": 0,
-    "solved": false
+    "solved": true
   },
   {
     "num1": 154,
@@ -222,6 +222,74 @@
     "ans_dec_places": 2,
     "right_dec_places": 0,
     "timestamp": "2026-07-10 18:10:54",
+    "retry_count": 0,
+    "solved": false
+  },
+  {
+    "num1": 58,
+    "num2": 9,
+    "op": "×",
+    "expected": 522,
+    "user_answer": "472",
+    "timeout": false,
+    "time_limit": 30,
+    "digits_a": 2,
+    "digits_b": 1,
+    "decimal_places": 0,
+    "ans_dec_places": 0,
+    "right_dec_places": 0,
+    "timestamp": "2026-07-11 12:05:14",
+    "retry_count": 0,
+    "solved": false
+  },
+  {
+    "num1": 46,
+    "num2": 6,
+    "op": "×",
+    "expected": 276,
+    "user_answer": "474",
+    "timeout": false,
+    "time_limit": 30,
+    "digits_a": 2,
+    "digits_b": 1,
+    "decimal_places": 0,
+    "ans_dec_places": 0,
+    "right_dec_places": 0,
+    "timestamp": "2026-07-11 12:05:26",
+    "retry_count": 0,
+    "solved": false
+  },
+  {
+    "num1": 50,
+    "num2": 8,
+    "op": "×",
+    "expected": 400,
+    "user_answer": "40",
+    "timeout": false,
+    "time_limit": 30,
+    "digits_a": 2,
+    "digits_b": 1,
+    "decimal_places": 0,
+    "ans_dec_places": 0,
+    "right_dec_places": 0,
+    "timestamp": "2026-07-11 12:05:30",
+    "retry_count": 0,
+    "solved": false
+  },
+  {
+    "num1": 47,
+    "num2": 4,
+    "op": "÷",
+    "expected": 1175,
+    "user_answer": "13.75",
+    "timeout": false,
+    "time_limit": 30,
+    "digits_a": 2,
+    "digits_b": 1,
+    "decimal_places": 0,
+    "ans_dec_places": 2,
+    "right_dec_places": 0,
+    "timestamp": "2026-07-11 12:05:44",
     "retry_count": 0,
     "solved": false
   }

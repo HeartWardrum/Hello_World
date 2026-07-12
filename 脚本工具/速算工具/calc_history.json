@@ -52,5 +52,18 @@
     "correct": 8,
     "accuracy": 80.0,
     "total_sec": 131.0
+  },
+  {
+    "time": "2026-07-11 12:06:12",
+    "digits_a": 2,
+    "digits_b": 1,
+    "ops": [
+      "×",
+      "÷"
+    ],
+    "total": 10,
+    "correct": 6,
+    "accuracy": 60.0,
+    "total_sec": 94.0
   }
 ]
