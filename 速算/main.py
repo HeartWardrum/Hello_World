@@ -269,6 +269,90 @@ class TwoDigitTimesOne(Exercise):
             return False
 
 
+# 与资料分析特殊分数表一致：1/n ≈ 百分数
+_BAIHUAFEN: list[tuple[int, str]] = [
+    (2, "50%"),
+    (3, "33.3%"),
+    (4, "25%"),
+    (5, "20%"),
+    (6, "16.7%"),
+    (7, "14.3%"),
+    (8, "12.5%"),
+    (9, "11.1%"),
+    (10, "10%"),
+    (11, "9.1%"),
+    (12, "8.3%"),
+    (13, "7.7%"),
+    (14, "7.1%"),
+    (15, "6.7%"),
+    (16, "6.25%"),
+    (17, "5.9%"),
+    (18, "5.6%"),
+    (19, "5.3%"),
+    (20, "5%"),
+]
+
+_CHOICE_LETTERS = ("A", "B", "C", "D")
+
+
+def _normalize_choice(raw: str) -> str | None:
+    s = raw.strip().upper()
+    if s in _CHOICE_LETTERS:
+        return s
+    if s in ("1", "2", "3", "4"):
+        return _CHOICE_LETTERS[int(s) - 1]
+    return None
+
+
+@register
+class BaiHuaFenChoice(Exercise):
+    name = "百化分速选（四选一）"
+    time_limit = 15.0
+    answer_prompt = "选项> "
+
+    def generate(self) -> Question:
+        correct_n, correct_pct = random.choice(_BAIHUAFEN)
+        distractors = random.sample(
+            [pair for pair in _BAIHUAFEN if pair[0] != correct_n],
+            k=3,
+        )
+        options = [(correct_n, correct_pct), *distractors]
+        random.shuffle(options)
+
+        percent_to_frac = random.choice((True, False))
+        if percent_to_frac:
+            stem = f"约 {correct_pct} 最接近下列哪个分数？"
+            labels = [f"1/{n}" for n, _ in options]
+        else:
+            stem = f"1/{correct_n} 约等于百分之几？"
+            labels = [pct for _, pct in options]
+
+        lines = [stem]
+        answer_letter = "A"
+        for letter, label, (n, pct) in zip(_CHOICE_LETTERS, labels, options):
+            lines.append(f"  {letter}. {label}")
+            if n == correct_n:
+                answer_letter = letter
+
+        correct_label = next(
+            label
+            for letter, label in zip(_CHOICE_LETTERS, labels)
+            if letter == answer_letter
+        )
+        return Question(
+            display="\n".join(lines),
+            answer_hint="A/B/C/D",
+            expected=answer_letter,
+            reveal=f"{answer_letter}. {correct_label}",
+        )
+
+    def check(self, raw: str, question: Question) -> bool:
+        choice = _normalize_choice(raw)
+        if choice is None:
+            return False
+        return choice == question.expected
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
