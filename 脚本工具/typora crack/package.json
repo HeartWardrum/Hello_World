@@ -1,0 +1,20 @@
+{
+  "name": "typora-crack",
+  "version": "1.0.0",
+  "description": "",
+  "main": "crack.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@electron/fuses": "^2.1.3",
+    "asar": "^3.2.0",
+    "chalk": "^4.1.2",
+    "readline-sync": "^1.4.10",
+    "winreg": "^1.2.5"
+  }
+}
