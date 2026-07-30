@@ -9,7 +9,25 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional, Type
 
-DEFAULT_ROUNDS = 10
+DEFAULT_ROUNDS = 10  # 默认每局题数（菜单输入「编号 题数」可覆盖）
+
+# ---------------------------------------------------------------------------
+# 每题限时（秒）—— 只改这里即可调整各模块节奏
+# ---------------------------------------------------------------------------
+TIME_三位数加减 = 20.0      # 三位数加减（和与差）
+TIME_两位数乘一位数 = 8.0  # 两位数乘一位数
+TIME_百化分速选 = 15.0      # 百化分速选（四选一）
+TIME_截位直除 = 25.0        # 截位直除（四选一）
+TIME_增长量百化分 = 25.0    # 增长量（百化分）
+TIME_基期量 = 30.0          # 基期量（÷(1+r)）
+TIME_分数比大小 = 20.0      # 分数比大小
+TIME_间隔增长率 = 20.0      # 间隔增长率
+TIME_邻近百化分 = 15.0      # 邻近百化分（四选一）
+TIME_两位数乘两位数 = 40.0  # 两位数乘两位数
+TIME_乘除一加r = 30.0       # ×(1+r) / ÷(1+r)
+TIME_年均增长率 = 35.0      # 年均增长率（代入验算）
+TIME_平方数速记 = 12.0      # 平方数速记（11~30）
+TIME_凑整乘除 = 20.0        # 凑整乘除（×5/25/125）
 
 # ---------------------------------------------------------------------------
 # Exercise API
@@ -319,7 +337,7 @@ _NEAR_BAIHUAFEN: list[tuple[str, int]] = [
 @register
 class ThreeDigitAddSub(Exercise):
     name = "三位数加减（和与差）"
-    time_limit = 30.0
+    time_limit = TIME_三位数加减
     answer_prompt = "和 差> "
 
     def generate(self) -> Question:
@@ -344,7 +362,7 @@ class ThreeDigitAddSub(Exercise):
 @register
 class TwoDigitTimesOne(Exercise):
     name = "两位数乘一位数"
-    time_limit = 30.0
+    time_limit = TIME_两位数乘一位数
     answer_prompt = "积> "
 
     def generate(self) -> Question:
@@ -368,7 +386,7 @@ class TwoDigitTimesOne(Exercise):
 @register
 class BaiHuaFenChoice(Exercise):
     name = "百化分速选（四选一）"
-    time_limit = 15.0
+    time_limit = TIME_百化分速选
     answer_prompt = "选项> "
 
     def generate(self) -> Question:
@@ -398,7 +416,7 @@ class BaiHuaFenChoice(Exercise):
 @register
 class JieWeiZhiChu(Exercise):
     name = "截位直除（四选一）"
-    time_limit = 25.0
+    time_limit = TIME_截位直除
     answer_prompt = "选项> "
 
     def generate(self) -> Question:
@@ -442,7 +460,7 @@ class JieWeiZhiChu(Exercise):
 @register
 class ZengZhangLiangBaiHuaFen(Exercise):
     name = "增长量（百化分）"
-    time_limit = 25.0
+    time_limit = TIME_增长量百化分
     answer_prompt = "增长量> "
 
     def generate(self) -> Question:
@@ -476,7 +494,7 @@ class ZengZhangLiangBaiHuaFen(Exercise):
 @register
 class JiQiLiang(Exercise):
     name = "基期量（÷(1+r)）"
-    time_limit = 30.0
+    time_limit = TIME_基期量
     answer_prompt = "基期> "
 
     def generate(self) -> Question:
@@ -506,7 +524,7 @@ class JiQiLiang(Exercise):
 @register
 class FenShuBiJiao(Exercise):
     name = "分数比大小"
-    time_limit = 20.0
+    time_limit = TIME_分数比大小
     answer_prompt = "选项> "
 
     def generate(self) -> Question:
@@ -532,7 +550,7 @@ class FenShuBiJiao(Exercise):
 @register
 class JianGeZengZhangLv(Exercise):
     name = "间隔增长率"
-    time_limit = 20.0
+    time_limit = TIME_间隔增长率
     answer_prompt = "间隔增速%> "
 
     def generate(self) -> Question:
@@ -564,7 +582,7 @@ class JianGeZengZhangLv(Exercise):
 @register
 class LinJinBaiHuaFen(Exercise):
     name = "邻近百化分（四选一）"
-    time_limit = 15.0
+    time_limit = TIME_邻近百化分
     answer_prompt = "选项> "
 
     def generate(self) -> Question:
@@ -590,7 +608,7 @@ class LinJinBaiHuaFen(Exercise):
 @register
 class TwoDigitTimesTwo(Exercise):
     name = "两位数乘两位数"
-    time_limit = 40.0
+    time_limit = TIME_两位数乘两位数
     answer_prompt = "积> "
 
     def generate(self) -> Question:
@@ -612,7 +630,7 @@ class TwoDigitTimesTwo(Exercise):
 @register
 class ChengChuYiJiaR(Exercise):
     name = "×(1+r) / ÷(1+r)"
-    time_limit = 30.0
+    time_limit = TIME_乘除一加r
     answer_prompt = "结果> "
 
     def generate(self) -> Question:
@@ -644,7 +662,7 @@ class ChengChuYiJiaR(Exercise):
 @register
 class NianJunZengZhangLv(Exercise):
     name = "年均增长率（代入验算）"
-    time_limit = 35.0
+    time_limit = TIME_年均增长率
     answer_prompt = "选项> "
 
     def generate(self) -> Question:
@@ -678,7 +696,7 @@ class NianJunZengZhangLv(Exercise):
 @register
 class PingFangSuJi(Exercise):
     name = "平方数速记（11~30）"
-    time_limit = 12.0
+    time_limit = TIME_平方数速记
     answer_prompt = "结果> "
 
     def generate(self) -> Question:
@@ -706,7 +724,7 @@ class PingFangSuJi(Exercise):
 @register
 class CouZhengChengChu(Exercise):
     name = "凑整乘除（×5/25/125）"
-    time_limit = 20.0
+    time_limit = TIME_凑整乘除
     answer_prompt = "结果> "
 
     def generate(self) -> Question:
@@ -756,7 +774,7 @@ class CouZhengChengChu(Exercise):
 def print_menu() -> None:
     print("=== 速算 ===")
     for i, cls in enumerate(all_exercises(), start=1):
-        print(f"{i}. {cls.name}")
+        print(f"{i}. {cls.name}  每题 {cls.time_limit:g}s")
     print("0. 退出")
 
 
