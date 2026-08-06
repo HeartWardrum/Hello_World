@@ -16,6 +16,7 @@ DEFAULT_ROUNDS = 10  # 默认每局题数（菜单输入「编号 题数」可�
 # ---------------------------------------------------------------------------
 TIME_三位数加减 = 20.0      # 三位数加减（和与差）
 TIME_两位数乘一位数 = 8.0  # 两位数乘一位数
+TIME_三位数乘一位数 = 22.0  # 三位数乘一位数
 TIME_百化分速选 = 15.0      # 百化分速选（四选一）
 TIME_截位直除 = 25.0        # 截位直除（四选一）
 TIME_增长量百化分 = 25.0    # 增长量（百化分）
@@ -196,27 +197,33 @@ class GameRunner:
         limit = self.exercise.time_limit
         print(f"本局：{self.rounds} 题，每题 {limit:g} 秒\n")
 
-        for i in range(1, self.rounds + 1):
-            question = self.exercise.generate()
-            print(f"第 {i}/{self.rounds} 题")
-            print(f"  {question.display}")
+        try:
+            for i in range(1, self.rounds + 1):
+                question = self.exercise.generate()
+                print(f"第 {i}/{self.rounds} 题")
+                print(f"  {question.display}")
 
-            started = time.perf_counter()
-            raw = ask(self.exercise.answer_prompt, timeout=limit)
-            elapsed = time.perf_counter() - started
+                started = time.perf_counter()
+                raw = ask(self.exercise.answer_prompt, timeout=limit)
+                elapsed = time.perf_counter() - started
 
-            if raw is None:
-                print(f"❌ 超时！正确答案：{question.reveal}\n")
-                self.score.record(False)
-                continue
+                if raw is None:
+                    print(f"❌ 超时！正确答案：{question.reveal}\n")
+                    self.score.record(False)
+                    continue
 
-            ok = self.exercise.check(raw, question)
-            if ok:
-                print(f"✅ 正确！用时 {elapsed:.1f}s\n")
-                self.score.record(True, elapsed)
-            else:
-                print(f"❌ 错误！正确答案：{question.reveal}\n")
-                self.score.record(False)
+                ok = self.exercise.check(raw, question)
+                if ok:
+                    print(f"✅ 正确！用时 {elapsed:.1f}s\n")
+                    self.score.record(True, elapsed)
+                else:
+                    print(f"❌ 错误！正确答案：{question.reveal}\n")
+                    self.score.record(False)
+        except KeyboardInterrupt:
+            print("\n已中断。")
+            if self.score.total:
+                print(self.score.summary())
+            return self.score
 
         print(self.score.summary())
         return self.score
@@ -367,6 +374,35 @@ class TwoDigitTimesOne(Exercise):
 
     def generate(self) -> Question:
         a = random.randint(1, 9) * 10 + random.randint(1, 9)  # 11–99，个位非 0
+        b = random.randint(2, 9)
+        product = a * b
+        return Question(
+            display=f"{a} × {b}",
+            answer_hint="积",
+            expected=product,
+            reveal=str(product),
+        )
+
+    def check(self, raw: str, question: Question) -> bool:
+        try:
+            return int(raw.strip()) == question.expected
+        except ValueError:
+            return False
+
+
+@register
+class ThreeDigitTimesOne(Exercise):
+    name = "三位数乘一位数"
+    time_limit = TIME_三位数乘一位数
+    answer_prompt = "积> "
+
+    def generate(self) -> Question:
+        # 101–999，个位非 0，避免乘整十过于简单
+        a = (
+            random.randint(1, 9) * 100
+            + random.randint(0, 9) * 10
+            + random.randint(1, 9)
+        )
         b = random.randint(2, 9)
         product = a * b
         return Question(
@@ -809,10 +845,13 @@ def main() -> None:
             print()
             break
 
+        parts = line.strip().split()
+        # 选 0（或空回车）直接退出，不二次确认
+        if not parts or parts[0] == "0":
+            break
+
         parsed = parse_choice(line)
         if parsed is None:
-            if line.strip() in ("", "0"):
-                break
             print("无效输入，请输入题型编号，或「编号 题数」。\n")
             continue
 
