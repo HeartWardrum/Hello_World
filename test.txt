@@ -1,1 +1,5 @@
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Type DWord -Value 0
+# 搜索所有卸载信息中带有 Access 或 ACE 的条目
+Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue | 
+ForEach-Object { Get-ItemProperty $_.PSPath } | 
+Where-Object { $_.DisplayName -match "Access|ACE|Database Engine" } | 
+Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString
