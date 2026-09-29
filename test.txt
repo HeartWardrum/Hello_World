@@ -1,21 +1,28 @@
-ps -eo pid,user,args | grep '[j]ava' | while read -r pid user args; do
-    echo "================================================================"
-    echo "PID   : $pid"
-    echo "USER  : $user"
+#!/bin/bash
+# 文件名：check_java_service.sh
+# 用途：只列出 Java 进程的服务名和启动方式
 
-    # 判断启动方式
-    if echo "$args" | grep -q -- '-jar '; then
-        jar=$(echo "$args" | grep -oP '(?<=-jar )\S+\.jar' | head -1)
-        echo "TYPE  : Spring Boot fat jar (-jar)"
-        echo "JAR   : $jar"
-    elif echo "$args" | grep -q -- '-cp \| -classpath '; then
-        cp=$(echo "$args" | grep -oP '(?<=-cp | -classpath )\S+' | head -1)
-        echo "TYPE  : classpath (-cp)"
-        echo "CP    : $cp"
+for pid in $(pgrep java 2>/dev/null); do
+    # 服务名（systemd）
+    svc=$(systemctl status "$pid" 2>/dev/null | head -1 | awk '{print $2}')
+    [ -z "$svc" ] && svc="(非 systemd 管理)"
+
+    # 启动命令
+    cmd=$(tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null)
+
+    # 启动方式
+    if echo "$cmd" | grep -q -- '-jar '; then
+        jar=$(echo "$cmd" | grep -oP '(?<=-jar )\S+\.jar' | head -1)
+        how="java -jar $jar"
+    elif echo "$cmd" | grep -qE -- '-cp | -classpath '; then
+        cp=$(echo "$cmd" | grep -oP '(?<=-cp | -classpath )\S+' | head -1)
+        how="java -cp $cp"
     else
-        echo "TYPE  : 其他 / 无法判断"
+        how="其他: $cmd"
     fi
 
-    echo "CMD   : $args"
+    echo "PID: $pid"
+    echo "  服务名  : $svc"
+    echo "  启动方式: $how"
     echo ""
 done
