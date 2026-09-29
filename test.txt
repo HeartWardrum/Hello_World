@@ -1,16 +1,27 @@
 #!/bin/bash
-# 文件名：check_java_service.sh
-# 用途：只列出 Java 进程的服务名和启动方式
+# 文件名：check_java_container.sh
+# 用途：列出所有 Java 进程对应的容器名和启动方式
 
 for pid in $(pgrep java 2>/dev/null); do
-    # 服务名（systemd）
-    svc=$(systemctl status "$pid" 2>/dev/null | head -1 | awk '{print $2}')
-    [ -z "$svc" ] && svc="(非 systemd 管理)"
+    echo "------------------------------------------------"
 
-    # 启动命令
+    # 从 cgroup 提取容器 ID（Podman/Docker 都适用）
+    cid=$(cat /proc/"$pid"/cgroup 2>/dev/null \
+          | grep -oP '(?<=/)[0-9a-f]{12,64}' \
+          | tail -1)
+
+    # 用容器 ID 反查容器名
+    if [ -n "$cid" ]; then
+        # 先试 Podman，再试 Docker
+        name=$(podman inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+        [ -z "$name" ] && name=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+        [ -z "$name" ] && name="(容器 $cid)"
+    else
+        name="(非容器进程)"
+    fi
+
+    # 启动方式（从容器内 Java 进程的命令行取）
     cmd=$(tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null)
-
-    # 启动方式
     if echo "$cmd" | grep -q -- '-jar '; then
         jar=$(echo "$cmd" | grep -oP '(?<=-jar )\S+\.jar' | head -1)
         how="java -jar $jar"
@@ -21,8 +32,8 @@ for pid in $(pgrep java 2>/dev/null); do
         how="其他: $cmd"
     fi
 
-    echo "PID: $pid"
-    echo "  服务名  : $svc"
-    echo "  启动方式: $how"
+    echo "PID      : $pid"
+    echo "容器名   : $name"
+    echo "启动方式 : $how"
     echo ""
 done
