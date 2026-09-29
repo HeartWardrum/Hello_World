@@ -1,5 +1,4 @@
-# 搜索所有卸载信息中带有 Access 或 ACE 的条目
-Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue | 
-ForEach-Object { Get-ItemProperty $_.PSPath } | 
-Where-Object { $_.DisplayName -match "Access|ACE|Database Engine" } | 
-Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString
+for pid in $(pgrep java); do
+    echo "=== PID: $pid ==="
+    lsof -p $pid 2>/dev/null | grep -i 'spring-core' | awk '{print $9}'
+done
