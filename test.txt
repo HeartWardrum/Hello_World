@@ -1,27 +1,28 @@
 #!/bin/bash
-# 文件名：check_java_container.sh
-# 用途：列出所有 Java 进程对应的容器名和启动方式
+# 文件名：check_java_realname.sh
+# 用途：从父进程链和工作目录推断 Java 程序的真实身份
 
 for pid in $(pgrep java 2>/dev/null); do
     echo "------------------------------------------------"
 
-    # 从 cgroup 提取容器 ID（Podman/Docker 都适用）
-    cid=$(cat /proc/"$pid"/cgroup 2>/dev/null \
-          | grep -oP '(?<=/)[0-9a-f]{12,64}' \
-          | tail -1)
+    # 工作目录
+    cwd=$(readlink /proc/"$pid"/cwd 2>/dev/null)
 
-    # 用容器 ID 反查容器名
-    if [ -n "$cid" ]; then
-        # 先试 Podman，再试 Docker
-        name=$(podman inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
-        [ -z "$name" ] && name=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
-        [ -z "$name" ] && name="(容器 $cid)"
-    else
-        name="(非容器进程)"
-    fi
+    # 父进程链：逐级往上找，直到 PID 1
+    chain=""
+    cur=$pid
+    for i in 1 2 3 4 5; do
+        ppid=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ')
+        [ -z "$ppid" ] || [ "$ppid" == "0" ] || [ "$ppid" == "1" ] && break
+        pcmd=$(tr '\0' ' ' < /proc/"$ppid"/cmdline 2>/dev/null)
+        chain="$chain -> [$ppid] $pcmd"
+        cur=$ppid
+    done
 
-    # 启动方式（从容器内 Java 进程的命令行取）
+    # 启动命令
     cmd=$(tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null)
+
+    # 启动方式
     if echo "$cmd" | grep -q -- '-jar '; then
         jar=$(echo "$cmd" | grep -oP '(?<=-jar )\S+\.jar' | head -1)
         how="java -jar $jar"
@@ -29,11 +30,12 @@ for pid in $(pgrep java 2>/dev/null); do
         cp=$(echo "$cmd" | grep -oP '(?<=-cp | -classpath )\S+' | head -1)
         how="java -cp $cp"
     else
-        how="其他: $cmd"
+        how="其他"
     fi
 
     echo "PID      : $pid"
-    echo "容器名   : $name"
+    echo "工作目录 : $cwd"
     echo "启动方式 : $how"
+    echo "父进程链 :$chain"
     echo ""
 done
