@@ -1,4 +1,21 @@
-for pid in $(pgrep java); do
-    echo "=== PID: $pid ==="
-    lsof -p $pid 2>/dev/null | grep -i 'spring-core' | awk '{print $9}'
+ps -eo pid,user,args | grep '[j]ava' | while read -r pid user args; do
+    echo "================================================================"
+    echo "PID   : $pid"
+    echo "USER  : $user"
+
+    # 判断启动方式
+    if echo "$args" | grep -q -- '-jar '; then
+        jar=$(echo "$args" | grep -oP '(?<=-jar )\S+\.jar' | head -1)
+        echo "TYPE  : Spring Boot fat jar (-jar)"
+        echo "JAR   : $jar"
+    elif echo "$args" | grep -q -- '-cp \| -classpath '; then
+        cp=$(echo "$args" | grep -oP '(?<=-cp | -classpath )\S+' | head -1)
+        echo "TYPE  : classpath (-cp)"
+        echo "CP    : $cp"
+    else
+        echo "TYPE  : 其他 / 无法判断"
+    fi
+
+    echo "CMD   : $args"
+    echo ""
 done
