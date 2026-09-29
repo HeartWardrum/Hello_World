@@ -1,1 +1,112 @@
-hello world
+import tkinter as tk
+from tkinter import messagebox, scrolledtext
+import subprocess
+import os
+import datetime
+import threading
+
+# ========== 配置区 ==========
+REPO_PATH = r"D:\文档\github\Hello_World"        # 你的仓库路径
+FILE_NAME = r"脚本工具\传送工具\msg.txt"          # 用来存放消息的文件名
+# ============================
+
+def log(msg):
+    """向界面日志区追加一行，并滚动到底部"""
+    log_box.config(state="normal")
+    log_box.insert(tk.END, msg + "\n")
+    log_box.see(tk.END)
+    log_box.config(state="disabled")
+    root.update_idletasks()
+
+
+def run_git(args):
+    """执行 git 命令，把 stdout/stderr 实时打进日志区"""
+    log(f"$ git {' '.join(args)}")
+    proc = subprocess.Popen(
+        ["git"] + args,
+        cwd=REPO_PATH,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            log("  " + line)
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, ["git"] + args)
+
+
+def send_worker(content):
+    """后台线程里真正干活的函数"""
+    file_path = os.path.join(REPO_PATH, FILE_NAME)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        # 1. 写入文件（自动创建不存在的子目录）
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        log(f"📝 已写入文件：{file_path}")
+
+        # 2. 依次执行 git 命令
+        run_git(["add", FILE_NAME])
+        run_git(["commit", "-m", f"auto send {now}"])
+        run_git(["push"])
+
+        log(f"✅ 传送完成 {now}")
+        status_label.config(text=f"✅ 已传送 {now}", fg="green")
+
+    except subprocess.CalledProcessError as e:
+        log(f"❌ git 命令执行失败（返回码 {e.returncode}）")
+        status_label.config(text="❌ git 命令执行失败", fg="red")
+    except Exception as e:
+        log(f"❌ 出错：{e}")
+        status_label.config(text="❌ 出错", fg="red")
+    finally:
+        # 恢复按钮，允许下一次传送
+        send_btn.config(state="normal", text="🚀 传送")
+
+
+def send():
+    content = text_box.get("1.0", tk.END).strip()
+    if not content:
+        messagebox.showwarning("提示", "内容为空，没有可传送的内容。")
+        return
+
+    # 禁用按钮，防止重复点击
+    send_btn.config(state="disabled", text="⏳ 传送中…")
+    status_label.config(text="正在传送…", fg="gray")
+    log("=" * 50)
+
+    # 在后台线程里跑，避免界面卡死
+    threading.Thread(target=send_worker, args=(content,), daemon=True).start()
+
+
+# ========== 界面 ==========
+root = tk.Tk()
+root.title("传送工具")
+root.geometry("620x560")
+
+tk.Label(root, text="输入要传送的内容：", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
+
+text_box = tk.Text(root, height=8, wrap="word")
+text_box.pack(fill="both", expand=False, padx=10, pady=5)
+
+send_btn = tk.Button(root, text="🚀 传送", command=send, height=2, bg="#4CAF50", fg="white",
+                     font=("微软雅黑", 11, "bold"))
+send_btn.pack(fill="x", padx=10, pady=5)
+
+status_label = tk.Label(root, text="等待传送…", fg="gray")
+status_label.pack(pady=(0, 5))
+
+tk.Label(root, text="执行日志：", anchor="w").pack(fill="x", padx=10)
+
+log_box = scrolledtext.ScrolledText(root, height=12, wrap="word", state="disabled",
+                                    bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9))
+log_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+root.mainloop()
