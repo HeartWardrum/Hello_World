@@ -1,1 +1,7 @@
-11
+{
+  "preset": "academic",
+  "style": {
+    "fontFamily": "微软雅黑",
+    "codeFontFamily": "Consolas"
+  }
+}
