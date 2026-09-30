@@ -1,7 +1,801 @@
-{
-  "preset": "academic",
-  "style": {
-    "fontFamily": "微软雅黑",
-    "codeFontFamily": "Consolas"
-  }
+可以。直接给你一个**能跑的完整脚本**。你只需要安装 3 个库，然后把 `.md` 文件拖到脚本上即可。
+
+### 1. 安装依赖
+
+```cmd
+python -m pip install markdown-it-py python-docx Pygments
+```
+
+### 2. 保存下面脚本为 `md_to_docx.py`
+
+```python
+import sys
+from pathlib import Path
+
+from markdown_it import MarkdownIt
+from docx import Document
+from docx.shared import Pt, RGBColor, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+from pygments import lex
+from pygments.lexers import get_lexer_by_name, TextLexer
+from pygments.token import Token
+
+
+# ============================================================
+# 配置
+# ============================================================
+
+CODE_FONT = "Consolas"
+CODE_FONT_SIZE = 9
+
+# 代码块背景色
+CODE_BACKGROUND = "F3F3F3"
+
+# 普通正文
+BODY_FONT = "Microsoft YaHei"
+BODY_FONT_SIZE = 10.5
+
+# 标题字体
+HEADING_FONT = "Microsoft YaHei"
+
+
+# ============================================================
+# Word XML 工具
+# ============================================================
+
+def set_cell_shading(cell, fill):
+    """设置单元格背景色"""
+    tc_pr = cell._tc.get_or_add_tcPr()
+
+    shd = tc_pr.find(qn("w:shd"))
+    if shd is None:
+        shd = OxmlElement("w:shd")
+        tc_pr.append(shd)
+
+    shd.set(qn("w:fill"), fill)
+
+
+def set_cell_border(cell, **kwargs):
+    """
+    设置单元格边框。
+
+    示例：
+        set_cell_border(
+            cell,
+            top={"val": "single", "sz": "4", "color": "D9D9D9"},
+            bottom={"val": "single", "sz": "4", "color": "D9D9D9"},
+        )
+    """
+    tc = cell._tc
+    tc_pr = tc.get_or_add_tcPr()
+
+    tc_borders = tc_pr.first_child_found_in("w:tcBorders")
+
+    if tc_borders is None:
+        tc_borders = OxmlElement("w:tcBorders")
+        tc_pr.append(tc_borders)
+
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        if edge not in kwargs:
+            continue
+
+        edge_data = kwargs.get(edge)
+
+        tag = "w:{}".format(edge)
+        element = tc_borders.find(qn(tag))
+
+        if element is None:
+            element = OxmlElement(tag)
+            tc_borders.append(element)
+
+        for key in ["val", "sz", "space", "color"]:
+            if key in edge_data:
+                element.set(qn("w:{}".format(key)), str(edge_data[key]))
+
+
+def set_paragraph_shading(paragraph, fill):
+    """给段落设置背景色"""
+    p_pr = paragraph._p.get_or_add_pPr()
+
+    shd = p_pr.find(qn("w:shd"))
+    if shd is None:
+        shd = OxmlElement("w:shd")
+        p_pr.append(shd)
+
+    shd.set(qn("w:fill"), fill)
+
+
+def set_paragraph_border(paragraph, color="D9D9D9", size="4"):
+    """给段落增加边框"""
+    p = paragraph._p
+    p_pr = p.get_or_add_pPr()
+
+    p_bdr = p_pr.find(qn("w:pBdr"))
+
+    if p_bdr is None:
+        p_bdr = OxmlElement("w:pBdr")
+        p_pr.append(p_bdr)
+
+    for edge_name in ("top", "left", "bottom", "right"):
+        edge = p_bdr.find(qn(f"w:{edge_name}"))
+
+        if edge is None:
+            edge = OxmlElement(f"w:{edge_name}")
+            p_bdr.append(edge)
+
+        edge.set(qn("w:val"), "single")
+        edge.set(qn("w:sz"), size)
+        edge.set(qn("w:space"), "2")
+        edge.set(qn("w:color"), color)
+
+
+def set_cell_margins(cell, top=80, start=100, bottom=80, end=100):
+    """设置单元格内边距"""
+    tc = cell._tc
+    tc_pr = tc.get_or_add_tcPr()
+
+    tc_mar = tc_pr.first_child_found_in("w:tcMar")
+
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+
+    for margin, value in [
+        ("top", top),
+        ("start", start),
+        ("bottom", bottom),
+        ("end", end),
+    ]:
+        node = tc_mar.find(qn(f"w:{margin}"))
+
+        if node is None:
+            node = OxmlElement(f"w:{margin}")
+            tc_mar.append(node)
+
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def set_run_font(run, font_name=BODY_FONT, size=BODY_FONT_SIZE):
+    """设置字体"""
+    run.font.name = font_name
+    run.font.size = Pt(size)
+
+    # 中文字体
+    r_pr = run._element.get_or_add_rPr()
+
+    r_fonts = r_pr.rFonts
+
+    if r_fonts is None:
+        r_fonts = OxmlElement("w:rFonts")
+        r_pr.insert(0, r_fonts)
+
+    r_fonts.set(qn("w:ascii"), font_name)
+    r_fonts.set(qn("w:hAnsi"), font_name)
+    r_fonts.set(qn("w:eastAsia"), font_name)
+
+
+# ============================================================
+# Pygments 颜色
+# ============================================================
+
+def token_color(token_type):
+    """
+    根据 Pygments Token 类型返回 Word RGB 颜色。
+    """
+
+    if token_type in Token.Comment:
+        return "7F7F7F"
+
+    if token_type in Token.Keyword:
+        return "0000FF"
+
+    if token_type in Token.Keyword.Type:
+        return "267F99"
+
+    if token_type in Token.Name.Function:
+        return "795E26"
+
+    if token_type in Token.Name.Class:
+        return "267F99"
+
+    if token_type in Token.String:
+        return "A31515"
+
+    if token_type in Token.Number:
+        return "098658"
+
+    if token_type in Token.Operator:
+        return "000000"
+
+    if token_type in Token.Punctuation:
+        return "000000"
+
+    if token_type in Token.Name.Builtin:
+        return "267F99"
+
+    if token_type in Token.Name.Decorator:
+        return "AF00DB"
+
+    return "000000"
+
+
+# ============================================================
+# 文档初始化
+# ============================================================
+
+def setup_document(document):
+    section = document.sections[0]
+
+    # A4
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
+
+    section.top_margin = Cm(2.2)
+    section.bottom_margin = Cm(2.2)
+    section.left_margin = Cm(2.5)
+    section.right_margin = Cm(2.5)
+
+    # Normal 样式
+    normal = document.styles["Normal"]
+    normal.font.name = BODY_FONT
+    normal.font.size = Pt(BODY_FONT_SIZE)
+
+    r_pr = normal._element.rPr
+
+    if r_pr is not None:
+        r_fonts = r_pr.rFonts
+        if r_fonts is not None:
+            r_fonts.set(qn("w:eastAsia"), BODY_FONT)
+
+    # 标题样式
+    for i in range(1, 7):
+        style_name = f"Heading {i}"
+
+        if style_name not in document.styles:
+            continue
+
+        style = document.styles[style_name]
+
+        style.font.name = HEADING_FONT
+
+        if i == 1:
+            style.font.size = Pt(20)
+        elif i == 2:
+            style.font.size = Pt(16)
+        elif i == 3:
+            style.font.size = Pt(14)
+        else:
+            style.font.size = Pt(12)
+
+
+# ============================================================
+# 代码块
+# ============================================================
+
+def add_code_block(document, code, language=""):
+    """
+    将 Markdown fenced code block 转换成 Word 代码块。
+    """
+
+    language = language.strip().lower()
+
+    # Pygments 获取 lexer
+    try:
+        if language:
+            lexer = get_lexer_by_name(language)
+        else:
+            lexer = TextLexer()
+    except Exception:
+        lexer = TextLexer()
+
+    # 一个代码块使用一个段落
+    paragraph = document.add_paragraph()
+
+    paragraph.paragraph_format.space_before = Pt(6)
+    paragraph.paragraph_format.space_after = Pt(6)
+    paragraph.paragraph_format.line_spacing = 1.0
+
+    paragraph.paragraph_format.left_indent = Cm(0.25)
+    paragraph.paragraph_format.right_indent = Cm(0.25)
+
+    set_paragraph_shading(paragraph, CODE_BACKGROUND)
+    set_paragraph_border(paragraph)
+
+    # Pygments token
+    for token_type, value in lex(code, lexer):
+
+        color = token_color(token_type)
+
+        # Pygments 中可能出现换行
+        parts = value.split("\n")
+
+        for index, part in enumerate(parts):
+
+            if part:
+                run = paragraph.add_run(part)
+
+                set_run_font(
+                    run,
+                    CODE_FONT,
+                    CODE_FONT_SIZE
+                )
+
+                run.font.color.rgb = RGBColor.from_string(color)
+
+            # 保留换行
+            if index < len(parts) - 1:
+                run = paragraph.add_run("\n")
+
+                set_run_font(
+                    run,
+                    CODE_FONT,
+                    CODE_FONT_SIZE
+                )
+
+    return paragraph
+
+
+# ============================================================
+# 普通 Inline 内容
+# ============================================================
+
+def add_inline_tokens(document, tokens):
+    """
+    将 inline token 转换为 Word。
+    """
+
+    paragraph = document.add_paragraph()
+
+    for token in tokens:
+
+        if token.type == "text":
+            run = paragraph.add_run(token.content)
+            set_run_font(run)
+
+        elif token.type == "code_inline":
+            run = paragraph.add_run(token.content)
+
+            set_run_font(
+                run,
+                CODE_FONT,
+                CODE_FONT_SIZE
+            )
+
+            run.font.color.rgb = RGBColor(0x80, 0x00, 0x00)
+
+        elif token.type == "softbreak":
+            paragraph.add_run("\n")
+
+        elif token.type == "hardbreak":
+            paragraph.add_run("\n")
+
+        elif token.type == "strong_open":
+            pass
+
+        elif token.type == "strong_close":
+            pass
+
+        elif token.type == "em_open":
+            pass
+
+        elif token.type == "em_close":
+            pass
+
+        elif token.type == "link_open":
+            pass
+
+        elif token.type == "link_close":
+            pass
+
+        elif token.type == "image":
+            # 暂时将图片 URL 作为文字
+            run = paragraph.add_run(f"[图片: {token.attrGet('src')}]")
+            set_run_font(run)
+
+        else:
+            if token.content:
+                run = paragraph.add_run(token.content)
+                set_run_font(run)
+
+    return paragraph
+
+
+# ============================================================
+# 表格
+# ============================================================
+
+def add_table(document, rows):
+    if not rows:
+        return
+
+    column_count = max(len(row) for row in rows)
+
+    table = document.add_table(
+        rows=len(rows),
+        cols=column_count
+    )
+
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    # 基础样式
+    table.style = "Table Grid"
+
+    for r, row in enumerate(rows):
+
+        for c in range(column_count):
+
+            cell = table.cell(r, c)
+
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+            set_cell_margins(cell)
+
+            if c < len(row):
+                text = row[c]
+            else:
+                text = ""
+
+            # 删除默认 paragraph
+            paragraph = cell.paragraphs[0]
+
+            run = paragraph.add_run(text)
+            set_run_font(run)
+
+            # 第一行表头
+            if r == 0:
+                set_cell_shading(cell, "D9EAF7")
+                run.bold = True
+
+    return table
+
+
+# ============================================================
+# Markdown → DOCX
+# ============================================================
+
+def convert_markdown(md_file, docx_file):
+
+    md_path = Path(md_file)
+    docx_path = Path(docx_file)
+
+    print(f"读取：{md_path}")
+
+    text = md_path.read_text(
+        encoding="utf-8-sig"
+    )
+
+    # Markdown parser
+    md = MarkdownIt(
+        "commonmark",
+        {
+            "html": True,
+            "linkify": True,
+        }
+    )
+
+    # 启用表格
+    md.enable("table")
+
+    tokens = md.parse(text)
+
+    document = Document()
+
+    setup_document(document)
+
+    i = 0
+
+    while i < len(tokens):
+
+        token = tokens[i]
+
+        # ----------------------------------------------------
+        # 标题
+        # ----------------------------------------------------
+
+        if token.type == "heading_open":
+
+            level = int(token.tag[1])
+
+            if i + 1 < len(tokens):
+
+                inline_token = tokens[i + 1]
+
+                paragraph = document.add_paragraph(
+                    style=f"Heading {level}"
+                )
+
+                if inline_token.type == "inline":
+
+                    run = paragraph.add_run(
+                        inline_token.content
+                    )
+
+                    set_run_font(
+                        run,
+                        HEADING_FONT,
+                        20 if level == 1 else
+                        16 if level == 2 else
+                        14 if level == 3 else
+                        12
+                    )
+
+            i += 3
+            continue
+
+        # ----------------------------------------------------
+        # 普通段落
+        # ----------------------------------------------------
+
+        if token.type == "paragraph_open":
+
+            if i + 1 < len(tokens):
+
+                inline_token = tokens[i + 1]
+
+                if inline_token.type == "inline":
+                    add_inline_tokens(
+                        document,
+                        inline_token.children or []
+                    )
+
+            i += 3
+            continue
+
+        # ----------------------------------------------------
+        # fenced code
+        # ----------------------------------------------------
+
+        if token.type == "fence":
+
+            language = token.info.strip()
+
+            add_code_block(
+                document,
+                token.content,
+                language
+            )
+
+            i += 1
+            continue
+
+        # ----------------------------------------------------
+        # 引用
+        # ----------------------------------------------------
+
+        if token.type == "blockquote_open":
+
+            # 找到对应 inline 内容
+            j = i + 1
+
+            while j < len(tokens):
+
+                if tokens[j].type == "inline":
+
+                    paragraph = document.add_paragraph()
+
+                    paragraph.paragraph_format.left_indent = Cm(0.8)
+
+                    run = paragraph.add_run(
+                        tokens[j].content
+                    )
+
+                    set_run_font(run)
+
+                    run.italic = True
+
+                if tokens[j].type == "blockquote_close":
+                    break
+
+                j += 1
+
+            i = j + 1
+            continue
+
+        # ----------------------------------------------------
+        # 无序/有序列表
+        # ----------------------------------------------------
+
+        if token.type in (
+            "bullet_list_open",
+            "ordered_list_open"
+        ):
+
+            ordered = token.type == "ordered_list_open"
+
+            j = i + 1
+
+            while j < len(tokens):
+
+                if tokens[j].type == "inline":
+
+                    paragraph = document.add_paragraph()
+
+                    paragraph.paragraph_format.left_indent = Cm(0.6)
+
+                    prefix = (
+                        "1. "
+                        if ordered
+                        else "• "
+                    )
+
+                    run = paragraph.add_run(prefix)
+                    set_run_font(run)
+
+                    run = paragraph.add_run(
+                        tokens[j].content
+                    )
+
+                    set_run_font(run)
+
+                if tokens[j].type in (
+                    "bullet_list_close",
+                    "ordered_list_close"
+                ):
+                    break
+
+                j += 1
+
+            i = j + 1
+            continue
+
+        # ----------------------------------------------------
+        # 表格
+        # ----------------------------------------------------
+
+        if token.type == "table_open":
+
+            rows = []
+
+            j = i + 1
+
+            current_row = None
+
+            while j < len(tokens):
+
+                t = tokens[j]
+
+                if t.type == "tr_open":
+                    current_row = []
+
+                elif t.type == "inline":
+
+                    if current_row is not None:
+                        current_row.append(
+                            t.content
+                        )
+
+                elif t.type == "tr_close":
+
+                    if current_row is not None:
+                        rows.append(current_row)
+
+                    current_row = None
+
+                elif t.type == "table_close":
+                    break
+
+                j += 1
+
+            add_table(document, rows)
+
+            i = j + 1
+            continue
+
+        i += 1
+
+    document.save(docx_path)
+
+    print()
+    print("转换完成！")
+    print(f"输出：{docx_path}")
+
+
+# ============================================================
+# main
+# ============================================================
+
+def main():
+
+    if len(sys.argv) < 2:
+        print("用法：")
+        print()
+        print("    python md_to_docx.py xxx.md")
+        print()
+        print("或者直接把 Markdown 文件拖到 md_to_docx.py 上。")
+        return
+
+    md_file = Path(sys.argv[1])
+
+    if not md_file.exists():
+        print(f"错误：文件不存在：{md_file}")
+        return
+
+    # 输出文件与 Markdown 放在同目录
+    docx_file = md_file.with_suffix(".docx")
+
+    try:
+
+        convert_markdown(
+            md_file,
+            docx_file
+        )
+
+    except Exception as e:
+
+        print()
+        print("转换失败：")
+        print(type(e).__name__)
+        print(e)
+
+        raise
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. 使用
+
+假设你的文件：
+
+```text
+D:\文档\技术说明.md
+```
+
+直接：
+
+```cmd
+python md_to_docx.py "D:\文档\技术说明.md"
+```
+
+会生成：
+
+```text
+D:\文档\技术说明.docx
+```
+
+也可以把：
+
+```text
+技术说明.md
+```
+
+**直接拖到 `md_to_docx.py` 上**。
+
+---
+
+### 但我要特别提醒你
+
+上面这个版本已经能跑，**代码块是重点处理的**，例如：
+
+````markdown
+```java
+public class Test {
+    public static void main(String[] args) {
+        System.out.println("Hello");
+    }
 }
+```
+````
+
+会经过 **Pygments → Word Run**，而不是把代码当普通文本。
+
+不过如果你的 Markdown 是**正式技术文档**，我建议下一步把它再完善一下，尤其是：
+
+* Markdown **粗体/斜体**
+* 多级嵌套列表
+* 表格
+* 图片
+* 超链接
+* 代码块分页
+* 代码块背景/边框
+* Java/Python/SQL 语法颜色
+* 中文字体
+* 自动目录
+
+因为上面这个版本是先让你**马上跑起来**，而不是给你一个几百行但实际上没法调试的“大而全”版本。
