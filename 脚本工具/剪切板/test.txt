@@ -1,0 +1,568 @@
+self.app = QApplication(sys.argv)
+        self.app.setApplicationName(APP_NAME)
+        self.app.setQuitOnLastWindowClosed(False)class MainWindow(QMainWindow):
+    def __init__(self, history: HistoryStore, permanent: PermanentStore, config: dict):
+        super().__init__()
+        self.history = history
+        self.permanent = permanent
+        self.config = config
+        self._mode = "history"
+        self._search_keyword = ""
+        self._thumb_signals = ThumbnailSignals()
+        self._thumb_signals.done.connect(self._on_thumbnail_ready)
+        self._thumb_pool = QThreadPool.globalInstance()
+        self._thumb_pool.setMaxThreadCount(4)
+        self._item_map: dict = {}      
+        self._current_ids: list = []   
+        self._thumb_loaded: set = set()
+        self._thumb_loading: set = set()
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)   
+        self._search_timer.timeout.connect(self._do_refresh)
+
+        w = config.get("window_w", 1000)
+        h = config.get("window_h", 600)
+        self.setWindowTitle("ClipboardManager")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(w, h)
+        self._build_ui()
+        self._apply_style()
+
+    def _setup_focus_watcher(self):
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+    def _on_focus_changed(self, old, now):
+        if not self.config.get("focus_hide", True):
+            return
+        if not self.isVisible():
+            return
+        if now is None or (now.window() is not self and not isinstance(now.window(), QDialog)):
+            QTimer.singleShot(150, self._maybe_hide)
+
+    def _maybe_hide(self):
+        if not self.isActiveWindow():
+            if not (QApplication.activeModalWidget() or QApplication.activePopupWidget()):
+                self.hide()
+
+    def _position_near_cursor(self):
+        cursor_pos = QCursor.pos()
+        screen = QApplication.screenAt(cursor_pos)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+
+        w, h = self.width(), self.height()
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 3
+        self.move(x, y)
+
+    def _build_ui(self):
+        central = QWidget()
+        central.setObjectName("centralWidget")
+        self.setCentralWidget(central)
+
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ====== 顶部 ======
+        top_bar = QWidget()
+        top_bar.setObjectName("topBar")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(20, 15, 20, 15)
+        
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Type to filter entries...")
+        self.search_box.setObjectName("searchBox")
+        self.search_box.textChanged.connect(self._on_search)
+        self.search_box.installEventFilter(self)
+        top_layout.addWidget(self.search_box)
+        
+        self.toggle_btn = QPushButton("All Types ▾")
+        self.toggle_btn.setObjectName("toggleBtn")
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self.toggle_mode)
+        top_layout.addWidget(self.toggle_btn)
+        
+        main_layout.addWidget(top_bar)
+
+        # ====== 中间 ======
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.setHandleWidth(1)
+
+        # 左侧列表
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(10, 5, 10, 5)
+        left_layout.setSpacing(5)
+        
+        self.list_title = QLabel("Today")
+        self.list_title.setObjectName("listTitle")
+        left_layout.addWidget(self.list_title)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setObjectName("listWidget")
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_widget.setSpacing(2)
+        self.list_widget.setUniformItemSizes(True)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.list_widget.currentItemChanged.connect(self._on_item_selection_changed)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
+        self.list_widget.installEventFilter(self)
+        self.list_widget.verticalScrollBar().valueChanged.connect(
+            lambda _: self._schedule_visible_thumbnails()
+        )
+        left_layout.addWidget(self.list_widget)
+        self.splitter.addWidget(left_panel)
+
+        # 右侧详情
+        self.right_panel = QWidget()
+        self.right_panel.setObjectName("rightPanel")
+        right_layout = QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(20, 20, 20, 20)
+        right_layout.setSpacing(15)
+
+        self.preview_text = QTextEdit()
+        self.preview_text.setObjectName("previewText")
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        right_layout.addWidget(self.preview_text, 1)
+
+        self.preview_image = QLabel()
+        self.preview_image.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.preview_image.hide()
+        right_layout.addWidget(self.preview_image, 1)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("background-color: #333333;")
+        right_layout.addWidget(line)
+
+        info_title = QLabel("Information")
+        info_title.setObjectName("infoTitle")
+        right_layout.addWidget(info_title)
+        
+        info_grid = QFormLayout()
+        info_grid.setContentsMargins(0,0,0,0)
+        info_grid.setVerticalSpacing(10)
+        
+        self.info_type = QLabel("-")
+        self.info_type.setObjectName("infoValue")
+        self.info_chars = QLabel("-")
+        self.info_chars.setObjectName("infoValue")
+        
+        info_grid.addRow(self._create_info_label("Type"), self.info_type)
+        info_grid.addRow(self._create_info_label("Characters"), self.info_chars)
+        right_layout.addLayout(info_grid)
+
+        self.splitter.addWidget(self.right_panel)
+        self.splitter.setSizes([350, 430])
+        main_layout.addWidget(self.splitter, 1)
+
+        # ====== 底部 ======
+        bottom_bar = QWidget()
+        bottom_bar.setObjectName("bottomBar")
+        bottom_layout = QHBoxLayout(bottom_bar)
+        bottom_layout.setContentsMargins(15, 8, 15, 8)
+        
+        app_icon = QLabel("📋 Clipboard History")
+        app_icon.setStyleSheet("color: #888888; font-size: 12px; font-weight: bold;")
+        bottom_layout.addWidget(app_icon)
+        
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #777; font-size: 11px;")
+        bottom_layout.addWidget(self.status_label)
+        bottom_layout.addStretch()
+        
+        shortcut_lbl = QLabel("<b>Paste</b> ⏎  |  <b>Actions</b> Ctrl K")
+        shortcut_lbl.setStyleSheet("color: #999999; font-size: 12px;")
+        bottom_layout.addWidget(shortcut_lbl)
+        
+        main_layout.addWidget(bottom_bar)
+
+        self._refresh_list()
+        self._setup_focus_watcher()
+
+    def _create_info_label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color: #777777; font-size: 12px;")
+        return lbl
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QMainWindow { background: transparent; }
+            #centralWidget {
+                background-color: #1c1c1e;
+                border-radius: 12px;
+                border: 1px solid #3a3a3c;
+            }
+            #topBar { border-bottom: 1px solid #2c2c2e; }
+            #searchBox { 
+                background: transparent; color: #ffffff; border: none;
+                font-size: 22px; font-family: 'Segoe UI', sans-serif;
+            }
+            #toggleBtn { 
+                background: transparent; color: #a0a0a0; border: 1px solid #3a3a3c;
+                border-radius: 6px; padding: 4px 10px; font-size: 13px; 
+            }
+            #toggleBtn:hover { background: #2c2c2e; color: #ffffff; }
+            #mainSplitter::handle { background-color: #2c2c2e; }
+            #listTitle { color: #888888; font-size: 12px; padding-left: 4px; padding-bottom: 4px; }
+            #listWidget { background: transparent; border: none; outline: none; }
+            #listWidget::item { border-radius: 6px; margin-bottom: 2px; }
+            #listWidget::item:selected { background-color: #2c2c2e; }
+            #listWidget::item:hover:!selected { background-color: #242426; }
+            QScrollBar:vertical { background: transparent; width: 8px; }
+            QScrollBar::handle:vertical { background: #4a4a4c; border-radius: 4px; min-height: 20px; }
+            QScrollBar::handle:vertical:hover { background: #5a5a5c; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            #rightPanel { background: transparent; }
+            #previewText {
+                background: transparent; border: none; color: #e0e0e0;
+                font-size: 14px; font-family: 'Consolas', 'Courier New', monospace;
+            }
+            #infoTitle { color: #888888; font-size: 13px; font-weight: bold; margin-bottom: 5px; }
+            #infoValue { color: #d0d0d0; font-size: 12px; }
+            #bottomBar {
+                background-color: #1e1e20; border-top: 1px solid #2c2c2e;
+                border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+            }
+        """)
+
+    def _on_item_selection_changed(self, current, previous):
+        if not current:
+            self.preview_text.clear()
+            self.preview_text.show()
+            self.preview_image.hide()
+            self.info_type.setText("-")
+            self.info_chars.setText("-")
+            return
+            
+        entry = current.data(Qt.UserRole)
+        if entry.type == "text":
+            self.preview_image.hide()
+            self.preview_text.show()
+            self.preview_text.setText(entry.content)
+            self.info_type.setText("Text")
+            self.info_chars.setText(f"{len(entry.content)}")
+        elif entry.type == "image":
+            self.preview_text.hide()
+            self.preview_image.show()
+            data = entry.get_content()
+            if data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                scaled_pixmap = pixmap.scaled(self.right_panel.width() - 40, 
+                                              self.preview_image.height(), 
+                                              Qt.KeepAspectRatio, 
+                                              Qt.SmoothTransformation)
+                self.preview_image.setPixmap(scaled_pixmap)
+            self.info_type.setText("Image")
+            self.info_chars.setText("N/A")
+
+    def toggle_mode(self):
+        if self._mode == "history":
+            self._mode = "permanent"
+            self.toggle_btn.setText("Permanent ▾")
+            self.list_title.setText("Starred")
+        else:
+            self._mode = "history"
+            self.toggle_btn.setText("All Types ▾")
+            self.list_title.setText("Today")
+        self._current_ids = []
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self._do_refresh()
+
+    def _on_search(self, text: str):
+        self._search_keyword = text.strip()
+        self._search_timer.start()
+
+    def _entry_row_height(self, entry: ClipEntry) -> int:
+        return 34
+
+    def _update_status(self, count: int):
+        self.status_label.setText(f"({count})")
+
+    def _insert_entry_at(self, row: int, entry: ClipEntry) -> QListWidgetItem:
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(max(self.list_widget.width() - 10, 200),
+                               self._entry_row_height(entry)))
+        item.setData(Qt.UserRole, entry)
+        if row < 0:
+            self.list_widget.addItem(item)
+        else:
+            self.list_widget.insertItem(row, item)
+        widget = EntryItemWidget(entry)
+        self.list_widget.setItemWidget(item, widget)
+        self._item_map[entry.id] = (item, widget)
+        return item
+
+    def _prepend_entry(self, entry: ClipEntry):
+        self._insert_entry_at(0, entry)
+        self.list_widget.setCurrentRow(0)
+
+    def _remove_entry_by_id(self, entry_id: str):
+        pair = self._item_map.pop(entry_id, None)
+        if not pair: return
+        item, widget = pair
+        row = self.list_widget.row(item)
+        if row >= 0:
+            self.list_widget.takeItem(row)
+        widget.deleteLater()
+        self._thumb_loaded.discard(entry_id)
+        self._thumb_loading.discard(entry_id)
+
+    def _move_entry_to_top(self, entry_id: str, entry: ClipEntry):
+        pair = self._item_map.get(entry_id)
+        if not pair:
+            self._prepend_entry(entry)
+            return
+        item, old_widget = pair
+        row = self.list_widget.row(item)
+        if row <= 0:
+            item.setData(Qt.UserRole, entry)
+            return
+        self.list_widget.removeItemWidget(item)
+        taken = self.list_widget.takeItem(row)
+        old_widget.deleteLater()
+        taken.setData(Qt.UserRole, entry)
+        self.list_widget.insertItem(0, taken)
+        widget = EntryItemWidget(entry)
+        self.list_widget.setItemWidget(taken, widget)
+        self._item_map[entry_id] = (taken, widget)
+        self._thumb_loaded.discard(entry_id)
+        self.list_widget.setCurrentRow(0)
+
+    def _try_incremental_sync(self, entries: list, new_ids: list) -> bool:
+        old_ids = self._current_ids
+        if not old_ids: return False
+        if (new_ids and new_ids[0] not in old_ids and new_ids[1:] == old_ids[:len(new_ids) - 1]):
+            self._prepend_entry(entries[0])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+        if (new_ids and new_ids[0] in old_ids and new_ids[1:] == [i for i in old_ids if i != new_ids[0]]):
+            self._move_entry_to_top(new_ids[0], entries[0])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+        if len(new_ids) < len(old_ids) and new_ids == old_ids[:len(new_ids)]:
+            while len(self._current_ids) > len(new_ids):
+                self._remove_entry_by_id(self._current_ids[-1])
+            self._current_ids = new_ids
+            self._update_status(len(entries))
+            return True
+        if len(new_ids) == len(old_ids) - 1:
+            removed = set(old_ids) - set(new_ids)
+            if len(removed) == 1 and new_ids == [i for i in old_ids if i not in removed]:
+                self._remove_entry_by_id(removed.pop())
+                self._current_ids = new_ids
+                self._update_status(len(entries))
+                return True
+        return False
+
+    def _full_rebuild_list(self, entries: list, new_ids: list):
+        self.list_widget.setUpdatesEnabled(False)
+        self.list_widget.clear()
+        self._item_map.clear()
+        self._thumb_loaded.clear()
+        self._thumb_loading.clear()
+        for entry in entries:
+            self._insert_entry_at(-1, entry)
+        self.list_widget.setUpdatesEnabled(True)
+        self._current_ids = new_ids
+        self._update_status(len(entries))
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+        self._schedule_visible_thumbnails()
+
+    def _schedule_visible_thumbnails(self):
+        if not PIL_AVAILABLE or self.list_widget.count() == 0: return
+        viewport = self.list_widget.viewport().rect()
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if not item: continue
+            entry = item.data(Qt.UserRole)
+            if entry.type != "image": continue
+            if entry.id in self._thumb_loaded or entry.id in self._thumb_loading: continue
+            if not viewport.intersects(self.list_widget.visualItemRect(item)): continue
+            self._thumb_loading.add(entry.id)
+            self._thumb_pool.start(ThumbnailLoader(entry.id, entry, self._thumb_signals))
+
+    def _do_refresh(self):
+        kw = self._search_keyword
+        if self._mode == "history":
+            entries = self.history.search(kw) if kw else self.history.get_all()
+        else:
+            entries = self.permanent.search(kw) if kw else self.permanent.get_all()
+        new_ids = [e.id for e in entries]
+        if new_ids == self._current_ids:
+            self._update_status(len(entries))
+            return
+        if not kw and self._try_incremental_sync(entries, new_ids):
+            self._schedule_visible_thumbnails()
+            return
+        self._full_rebuild_list(entries, new_ids)
+
+    def _on_thumbnail_ready(self, entry_id: str, pixmap: QPixmap):
+        self._thumb_loading.discard(entry_id)
+        self._thumb_loaded.add(entry_id)
+
+    def refresh(self):
+        self._current_ids = []
+        self._refresh_list()
+
+    def refresh_if_dirty(self):
+        if self.history.consume_dirty():
+            self._do_refresh()
+
+    def _on_item_clicked(self, item: QListWidgetItem):
+        entry = item.data(Qt.UserRole)
+        self._paste_entry(entry)
+
+    def _paste_entry(self, entry: ClipEntry, as_plain_text=False):
+        cb = QApplication.clipboard()
+        if as_plain_text:
+            cb.setText(entry.content if entry.type == "text" else (entry.note or "[图片]"))
+        else:
+            if entry.type == "text":
+                cb.setText(entry.content)
+            else:
+                try:
+                    data = entry.get_content()
+                    ba = BytesIO(data)
+                    pil = Image.open(ba)
+                    pixmap = pil_to_qpixmap(pil)
+                    cb.setPixmap(pixmap)
+                except Exception:
+                    return
+        self.hide()
+        QTimer.singleShot(150, self._simulate_paste)
+
+    def _simulate_paste(self):
+        if PYAUTOGUI_AVAILABLE:
+            try:
+                pyautogui.hotkey("ctrl", "v")
+                return
+            except Exception:
+                pass
+        if PYNPUT_AVAILABLE:
+            try:
+                from pynput.keyboard import Key, Controller
+                kc = Controller()
+                with kc.pressed(Key.ctrl):
+                    kc.press("v")
+                    kc.release("v")
+            except Exception:
+                pass
+
+    def _on_context_menu(self, pos: QPoint):
+        item = self.list_widget.itemAt(pos)
+        if not item: return
+        entry = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #1c1c1e; color: #e0e0e0; border: 1px solid #3a3a3c; border-radius:6px; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 4px; }
+            QMenu::item:selected { background: #2c2c2e; }
+        """)
+        paste_action = menu.addAction("📋 Paste")
+        paste_action.triggered.connect(lambda: self._paste_entry(entry))
+
+        if self._mode == "history":
+            fav_action = menu.addAction("⭐ Star")
+            fav_action.triggered.connect(lambda: self._add_to_permanent(entry))
+            del_action = menu.addAction("🗑 Delete")
+            del_action.triggered.connect(lambda: self._remove_from_history(entry))
+        else:
+            del_action = menu.addAction("🗑 Remove Star")
+            del_action.triggered.connect(lambda: self._remove_from_permanent(entry))
+        menu.exec_(self.list_widget.viewport().mapToGlobal(pos))
+
+    def _add_to_permanent(self, entry: ClipEntry):
+        added = self.permanent.add(entry)
+        msg = "Saved!" if added else "Updated!"
+        self.status_label.setText(msg)
+        QTimer.singleShot(3000, lambda: self.status_label.setText(""))
+
+    def _remove_from_history(self, entry: ClipEntry):
+        self.history.remove(entry.id)
+        self._current_ids = []
+        self._refresh_list()
+
+    def _remove_from_permanent(self, entry: ClipEntry):
+        self.permanent.remove(entry.id)
+        self._current_ids = []
+        self._refresh_list()
+
+    def _clear_history(self):
+        if self._mode == "history":
+            ret = QMessageBox.question(self, "Clear", "Clear all history?", QMessageBox.Yes | QMessageBox.No)
+            if ret == QMessageBox.Yes:
+                self.history.clear_all()
+                self._full_rebuild_list([], [])
+
+    def open_settings(self):
+        dlg = SettingsDialog(self.config, self)
+        if dlg.exec_() == QDialog.Accepted:
+            new_cfg = dlg.get_config()
+            self.config.update(new_cfg)
+            self.history.max_count = new_cfg["max_count"]
+            self.history.max_days = new_cfg["max_days"]
+            self.history.force_cleanup()
+            save_config(self.config)
+            self._current_ids = []
+            self._refresh_list()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                count = self.list_widget.count()
+                if count > 0:
+                    current_row = self.list_widget.currentRow()
+                    next_row = current_row + (1 if key == Qt.Key_Down else -1)
+                    next_row = max(0, min(next_row, count - 1))
+                    self.list_widget.setCurrentRow(next_row)
+                    self.list_widget.scrollToItem(self.list_widget.currentItem())
+                return True
+            elif key in (Qt.Key_Return, Qt.Key_Enter):
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    entry = current_item.data(Qt.UserRole)
+                    self._paste_entry(entry, as_plain_text=(event.modifiers() == Qt.ShiftModifier))
+                return True
+            elif key == Qt.Key_K and event.modifiers() == Qt.ControlModifier:
+                # 模拟 Raycast 的 Ctrl K 呼出菜单
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    rect = self.list_widget.visualItemRect(current_item)
+                    pos = rect.center()
+                    self._on_context_menu(pos)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+        elif event.key() == Qt.Key_G and event.modifiers() == Qt.ControlModifier:
+            self.toggle_mode()
+        else:
+            super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and hasattr(self, "_drag_pos"):
+            self.move(event.globalPos() - self._drag_pos)

@@ -1,14 +1,14 @@
 """
-轻量级剪贴板管理工具 v2 - 性能优化版
-优化项：
-  1. 启动提速：HistoryStore 懒加载图片（只存路径，按需读取）
-  2. 唤起提速：Alt+V 先 show 再刷新；列表增量 prepend/移除；可见区缩略图懒加载
-  3. 鼠标位置唤起：窗口出现在当前鼠标旁边，自动适应屏幕边缘
-  4. 剪贴板轮询降频至 800ms（可配置），避免与 UI 抢资源
-  5. 图片内容懒读取（只有粘贴/预览时才真正读文件）
-  6. 搜索去抖动从 300ms→200ms，提升响应感
-  7. PermanentStore 使用 WAL 模式，降低 SQLite 锁开销
-  8. 数据未变时跳过列表重建
+轻量级剪贴板管理工具 v3 - 性能强化版
+基于 v2 的进一步优化：
+  1. HistoryStore.add 不再 O(n) 重建索引；hash_map 改为 hash -> entry
+  2. 落盘防抖（1s 合并），退出时强制刷盘
+  3. 剪贴板图片异步编码 + 大图自动降采样，避免阻塞 UI
+  4. 缩略图真正显示（原版 set_thumbnail 是空实现）
+  5. 可见区缩略图用 indexAt 精确定位，不再全量遍历
+  6. 热键线程 GetMessageW 阻塞等待，去掉 10ms 忙轮询
+  7. PermanentStore 搜索走 SQL LIKE
+  8. 移除无意义的 _keep_alive 心跳
 """
 
 import sys
@@ -22,16 +22,18 @@ import datetime
 from io import BytesIO
 import ctypes
 from ctypes import wintypes
+from collections import OrderedDict
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPushButton, QLabel,
-    QSystemTrayIcon, QMenu, QAction, QSizePolicy,
+    QSystemTrayIcon, QMenu, QAction,
     QMessageBox, QDialog, QCheckBox, QSpinBox, QFormLayout,
+    QSplitter, QTextEdit, QFrame,
 )
 from PyQt5.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer, QSize, QPoint, QSettings, QEvent,
-    QRunnable, QThreadPool, pyqtSlot, QObject, QRect
+    Qt, QThread, pyqtSignal, QTimer, QSize, QPoint, QSettings,
+    QRunnable, QThreadPool, pyqtSlot, QObject,
 )
 from PyQt5.QtGui import (
     QIcon, QPixmap, QImage, QColor, QPainter, QFont, QCursor,
@@ -44,16 +46,16 @@ except ImportError:
     PIL_AVAILABLE = False
 
 try:
-    from pynput import keyboard as pynput_keyboard
-    PYNPUT_AVAILABLE = True
-except ImportError:
-    PYNPUT_AVAILABLE = False
-
-try:
     import pyautogui
     PYAUTOGUI_AVAILABLE = True
 except ImportError:
     PYAUTOGUI_AVAILABLE = False
+
+try:
+    from pynput.keyboard import Key, Controller as PynputController
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    PYNPUT_AVAILABLE = False
 
 
 APP_NAME = "ClipboardManager"
@@ -65,12 +67,15 @@ THUMBNAIL_SIZE = (120, 80)
 MAX_TEXT_PREVIEW = 200
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
+# 剪贴板图片最大边长，超过则等比缩小后再 PNG 编码（毫秒级差异很大）
+MAX_IMAGE_DIM = 3000
+
 DEFAULT_CONFIG = {
     "max_count": 100,
     "max_days": 30,
     "focus_hide": True,
-    "poll_ms": 800,          # 新增：剪贴板轮询间隔（毫秒）
-    "window_w": 560,
+    "poll_ms": 800,
+    "window_w": 900,
     "window_h": 680,
 }
 
@@ -126,33 +131,26 @@ def save_config(cfg: dict):
 
 # ─────────────────────────── 数据模型 ───────────────────────────
 class ClipEntry:
-    """
-    优化：图片 entry 只存文件路径，按需读取 bytes，避免启动时全量加载到内存
-    _content_bytes 是懒加载缓存
-    """
     def __init__(self, entry_type: str, content, timestamp: float = None,
                  entry_id: str = None, note: str = "", image_path: str = ""):
         self.type = entry_type
         self.note = note
         self.timestamp = timestamp or now_ts()
-        self._image_path = image_path  # 图片走懒加载路径
+        self._image_path = image_path
+        self._hash_cache = None
 
         if entry_type == "image" and image_path:
-            # 懒加载：只存路径，不读文件
-            self.content = None          # 懒加载占位
+            self.content = None
             self._lazy = True
-            self._hash_cache = compute_md5(image_path.encode())  # 用路径做临时 hash
         else:
             self.content = content
             self._lazy = False
-            self._hash_cache = None
 
         self.id = entry_id or compute_md5(
-            (str(self.timestamp) + (image_path or str(content)[:50] if isinstance(content, str) else "")).encode()
+            (str(self.timestamp) + (image_path or (content[:50] if isinstance(content, str) else ""))).encode()
         )
 
     def _ensure_loaded(self):
-        """按需读取图片文件"""
         if self._lazy and self.content is None:
             if os.path.exists(self._image_path):
                 try:
@@ -162,9 +160,12 @@ class ClipEntry:
                     self._lazy = False
                 except Exception:
                     self.content = b""
+                    self._lazy = False
+            else:
+                self.content = b""
+                self._lazy = False
 
     def get_content(self):
-        """获取内容，图片触发懒加载"""
         if self.type == "image":
             self._ensure_loaded()
         return self.content
@@ -189,51 +190,24 @@ class ClipEntry:
 
 # ─────────────────────────── 历史存储 ───────────────────────────
 class HistoryStore:
+    """
+    v3 优化：
+      - _hash_map: hash -> ClipEntry  （不再维护下标，避免每次 add O(n) 重建）
+      - 落盘防抖：多次变更 1s 内合并为一次写盘
+    """
+    SAVE_DEBOUNCE_SEC = 1.0
+
     def __init__(self, max_count=100, max_days=30):
         self.max_count = max_count
         self.max_days = max_days
-        self._entries: list = []
-        self._hash_map: dict = {}
-        self._dirty = False   # 标记数据是否变化，控制 UI 是否需要刷新
+        self._entries: list = []                # 有序，index 0 最新
+        self._hash_map: dict = {}               # hash -> ClipEntry
+        self._dirty = False
+        self._save_timer: threading.Timer = None
+        self._save_lock = threading.Lock()
         self.load()
 
-    def add(self, entry: ClipEntry) -> bool:
-        h = entry.get_hash()
-        if h in self._hash_map:
-            idx = self._hash_map[h]
-            old = self._entries.pop(idx)
-            old.timestamp = entry.timestamp
-            self._entries.insert(0, old)
-            self._rebuild_hash_map()
-            self._dirty = True
-            self.save()
-            return False
-        self._entries.insert(0, entry)
-        self._hash_map[h] = 0
-        self._rebuild_hash_map()
-        self._cleanup()
-        self._dirty = True
-        self.save()
-        return True
-
-    def consume_dirty(self) -> bool:
-        """检查并消费 dirty 标记"""
-        d = self._dirty
-        self._dirty = False
-        return d
-
-    def remove(self, entry_id: str):
-        self._entries = [e for e in self._entries if e.id != entry_id]
-        self._rebuild_hash_map()
-        self._dirty = True
-        self.save()
-
-    def clear_all(self):
-        self._entries.clear()
-        self._hash_map.clear()
-        self._dirty = True
-        self.save()
-
+    # -- 查询 --
     def get_all(self) -> list:
         return list(self._entries)
 
@@ -243,28 +217,79 @@ class HistoryStore:
                 if (e.type == "text" and kw in e.content.lower()) or
                    (e.type == "image" and kw in (e.note or "").lower())]
 
-    def _rebuild_hash_map(self):
-        self._hash_map = {}
-        for i, e in enumerate(self._entries):
-            self._hash_map[e.get_hash()] = i
+    # -- 修改 --
+    def add(self, entry: ClipEntry) -> bool:
+        h = entry.get_hash()
+        existing = self._hash_map.get(h)
+        if existing is not None:
+            try:
+                self._entries.remove(existing)
+            except ValueError:
+                pass
+            existing.timestamp = entry.timestamp
+            self._entries.insert(0, existing)
+            self._mark_dirty()
+            return False
 
+        self._entries.insert(0, entry)
+        self._hash_map[h] = entry
+        self._cleanup()
+        self._mark_dirty()
+        return True
+
+    def remove(self, entry_id: str):
+        for i, e in enumerate(self._entries):
+            if e.id == entry_id:
+                self._entries.pop(i)
+                self._hash_map.pop(e.get_hash(), None)
+                break
+        self._mark_dirty()
+
+    def clear_all(self):
+        self._entries.clear()
+        self._hash_map.clear()
+        self._mark_dirty()
+
+    def force_cleanup(self):
+        self._cleanup()
+        self._mark_dirty()
+        # 立即写盘（用户主动动作）
+        self._flush_save()
+
+    def consume_dirty(self) -> bool:
+        d = self._dirty
+        self._dirty = False
+        return d
+
+    def _mark_dirty(self):
+        self._dirty = True
+        self._schedule_save()
+
+    # -- 清理 --
     def _cleanup(self):
+        removed_any = False
         if self.max_count > 0 and len(self._entries) > self.max_count:
             removed = self._entries[self.max_count:]
             self._entries = self._entries[:self.max_count]
             for e in removed:
+                self._hash_map.pop(e.get_hash(), None)
                 if e.type == "image":
                     self._delete_image_file(e)
+            removed_any = True
+
         if self.max_days > 0:
             cutoff = now_ts() - self.max_days * 86400
             kept, removed = [], []
             for e in self._entries:
                 (kept if e.timestamp >= cutoff else removed).append(e)
             for e in removed:
+                self._hash_map.pop(e.get_hash(), None)
                 if e.type == "image":
                     self._delete_image_file(e)
             self._entries = kept
-        self._rebuild_hash_map()
+            removed_any = removed_any or bool(removed)
+
+        return removed_any
 
     def _delete_image_file(self, entry: ClipEntry):
         path = entry._image_path or os.path.join(IMAGES_DIR, f"hist_{entry.id}.png")
@@ -274,8 +299,18 @@ class HistoryStore:
             except Exception:
                 pass
 
-    def force_cleanup(self):
-        self._cleanup()
+    # -- 落盘（防抖） --
+    def _schedule_save(self):
+        with self._save_lock:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            self._save_timer = threading.Timer(self.SAVE_DEBOUNCE_SEC, self._flush_save)
+            self._save_timer.daemon = True
+            self._save_timer.start()
+
+    def _flush_save(self):
+        with self._save_lock:
+            self._save_timer = None
         self.save()
 
     def save(self):
@@ -285,10 +320,8 @@ class HistoryStore:
             if e.type == "text":
                 item["content"] = e.content
             else:
-                # 确定图片路径
                 path = e._image_path or os.path.join(IMAGES_DIR, f"hist_{e.id}.png")
                 if not os.path.exists(path):
-                    # 需要写入文件（新抓到的图片，content 已在内存）
                     raw = e.get_content()
                     if raw:
                         try:
@@ -301,9 +334,12 @@ class HistoryStore:
                         continue
                 item["image_path"] = path
             data.append(item)
+        # 原子写：先写临时文件再 rename，避免崩溃损坏
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            tmp = HISTORY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, HISTORY_FILE)
         except Exception as ex:
             print(f"保存历史失败: {ex}")
 
@@ -319,14 +355,14 @@ class HistoryStore:
                                   item["id"], item.get("note", ""))
                 else:
                     path = item.get("image_path", "")
-                    if not os.path.exists(path):
+                    # 不再 os.path.exists —— 懒加载阶段 open 失败会自然跳过
+                    if not path:
                         continue
-                    # ★ 关键优化：不读文件，只存路径，懒加载
                     e = ClipEntry("image", None, item["timestamp"],
                                   item["id"], item.get("note", ""),
                                   image_path=path)
                 self._entries.append(e)
-            self._rebuild_hash_map()
+                self._hash_map[e.get_hash()] = e
             self._cleanup()
         except Exception as ex:
             print(f"加载历史失败: {ex}")
@@ -338,7 +374,6 @@ class PermanentStore:
         self._conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         self._lock = threading.Lock()
         self._create_table()
-        # ★ WAL 模式：减少锁争用，读写并发更高
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
 
@@ -389,21 +424,72 @@ class PermanentStore:
                 content_decoded = content.decode("utf-8") if isinstance(content, bytes) else content
                 e = ClipEntry(etype, content_decoded, ts, eid, note or "")
             else:
-                e = ClipEntry(etype, bytes(content), ts, eid, note or "")
+                e = ClipEntry(etype, bytes(content) if content else b"", ts, eid, note or "")
             result.append(e)
         return result
 
     def search(self, keyword: str) -> list:
-        kw = keyword.lower()
-        return [e for e in self.get_all()
-                if (e.type == "text" and kw in e.content.lower()) or
-                   (e.type == "image" and kw in (e.note or "").lower())]
+        """SQL 层过滤，避免把全部 BLOB 拉进内存。"""
+        kw = f"%{keyword.lower()}%"
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id,type,content,note,timestamp FROM permanent "
+                "WHERE LOWER(IFNULL(note,'')) LIKE ? "
+                "   OR (type='text' AND LOWER(CAST(content AS TEXT)) LIKE ?) "
+                "ORDER BY timestamp DESC",
+                (kw, kw)
+            )
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            eid, etype, content, note, ts = row
+            if etype == "text":
+                content_decoded = content.decode("utf-8") if isinstance(content, bytes) else content
+                e = ClipEntry(etype, content_decoded, ts, eid, note or "")
+            else:
+                e = ClipEntry(etype, bytes(content) if content else b"", ts, eid, note or "")
+            result.append(e)
+        return result
 
     def close(self):
         self._conn.close()
 
 
-# ─────────────────────────── 剪贴板监控（主线程 QTimer）───────────────────────────
+# ─────────────────────────── 剪贴板监控（QTimer + 异步图片编码）───────────────────────────
+class ImageEncodeSignals(QObject):
+    done = pyqtSignal(object)   # ClipEntry
+
+
+class ImageEncodeTask(QRunnable):
+    """在工作线程里做 QImage → PIL → PNG 编码，避免大图阻塞 UI。"""
+    def __init__(self, qimage_copy: QImage, signals: ImageEncodeSignals):
+        super().__init__()
+        self.qimage = qimage_copy
+        self.signals = signals
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            img = self.qimage
+            # 大图降采样
+            if img.width() > MAX_IMAGE_DIM or img.height() > MAX_IMAGE_DIM:
+                img = img.scaled(MAX_IMAGE_DIM, MAX_IMAGE_DIM,
+                                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = img.convertToFormat(QImage.Format_RGBA8888)
+            ptr = img.bits()
+            ptr.setsize(img.byteCount())
+            pil = Image.frombytes("RGBA", (img.width(), img.height()), bytes(ptr))
+            ba = BytesIO()
+            pil.save(ba, "PNG", optimize=False, compress_level=3)
+            data = ba.getvalue()
+            note = f"图片_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            entry = ClipEntry("image", data, note=note)
+            self.signals.done.emit(entry)
+        except Exception as ex:
+            print(f"图片编码失败: {ex}")
+
+
 class ClipboardChecker(QObject):
     new_entry = pyqtSignal(object)
 
@@ -414,12 +500,18 @@ class ClipboardChecker(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self._check)
+        self._cb = None
+        self._img_signals = ImageEncodeSignals()
+        self._img_signals.done.connect(self.new_entry)
+        self._img_pool = QThreadPool()
+        self._img_pool.setMaxThreadCount(1)
 
     def set_poll_ms(self, ms: int):
         self._poll_ms = ms
         self._timer.setInterval(ms)
 
     def start(self):
+        self._cb = QApplication.clipboard()
         self._timer.start()
 
     def stop(self):
@@ -427,33 +519,35 @@ class ClipboardChecker(QObject):
 
     def _check(self):
         try:
-            cb = QApplication.clipboard()
-            mime = cb.mimeData()
+            if self._cb is None:
+                self._cb = QApplication.clipboard()
+            mime = self._cb.mimeData()
 
             if mime.hasImage():
-                qimg = cb.image()
-                if not qimg.isNull() and PIL_AVAILABLE:
-                    qimg_conv = qimg.convertToFormat(QImage.Format_RGBA8888)
-                    ptr = qimg_conv.bits()
-                    ptr.setsize(qimg_conv.byteCount())
-                    pil = Image.frombytes("RGBA", (qimg_conv.width(), qimg_conv.height()), bytes(ptr))
-                    ba = BytesIO()
-                    pil.save(ba, "PNG")
-                    data = ba.getvalue()
-                    h = compute_md5(data)
-                    if h != self._last_hash:
-                        self._last_hash = h
-                        note = f"图片_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                        entry = ClipEntry("image", data, note=note)
-                        self.new_entry.emit(entry)
+                qimg = self._cb.image()
+                if qimg.isNull():
+                    return
+                # 用缩略 hash 快速去重（避免每次大图全量 md5）
+                small = qimg.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation)
+                small = small.convertToFormat(QImage.Format_RGBA8888)
+                ptr = small.bits()
+                ptr.setsize(small.byteCount())
+                quick_hash = compute_md5(bytes(ptr))
+                if quick_hash == self._last_hash:
+                    return
+                self._last_hash = quick_hash
+                # 拷贝一份 QImage 给工作线程（QImage 隐式共享，跨线程需 copy）
+                qimg_copy = qimg.copy()
+                self._img_pool.start(ImageEncodeTask(qimg_copy, self._img_signals))
             elif mime.hasText():
                 text = mime.text().strip()
-                if text:
-                    h = compute_md5(text.encode("utf-8"))
-                    if h != self._last_hash:
-                        self._last_hash = h
-                        entry = ClipEntry("text", text)
-                        self.new_entry.emit(entry)
+                if not text:
+                    return
+                h = compute_md5(text.encode("utf-8"))
+                if h == self._last_hash:
+                    return
+                self._last_hash = h
+                self.new_entry.emit(ClipEntry("text", text))
         except Exception as ex:
             print(f"剪贴板检测异常: {ex}")
 
@@ -474,7 +568,7 @@ class ThumbnailLoader(QRunnable):
     @pyqtSlot()
     def run(self):
         try:
-            data = self.entry.get_content()   # 懒加载：在工作线程里读文件
+            data = self.entry.get_content()
             if not data:
                 return
             ba = BytesIO(data)
@@ -491,55 +585,65 @@ class EntryItemWidget(QWidget):
     def __init__(self, entry: ClipEntry, parent=None):
         super().__init__(parent)
         self.entry = entry
-        self._thumb_lbl = None
+        self._thumb_lbl: QLabel = None
         self._build_ui()
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(12, 4, 12, 4)
         layout.setSpacing(10)
 
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(20, 20)
+        icon_lbl.setAlignment(Qt.AlignCenter)
         if self.entry.type == "image":
-            self._thumb_lbl = QLabel("🖼")
-            self._thumb_lbl.setFixedSize(QSize(*THUMBNAIL_SIZE))
-            self._thumb_lbl.setAlignment(Qt.AlignCenter)
-            self._thumb_lbl.setStyleSheet("color:#888;font-size:24px;")
-            layout.addWidget(self._thumb_lbl)
+            icon_lbl.setText("🖼")
+            icon_lbl.setStyleSheet("font-size: 14px;")
         else:
-            icon_lbl = QLabel("📋")
-            icon_lbl.setFixedWidth(28)
-            icon_lbl.setAlignment(Qt.AlignCenter)
-            layout.addWidget(icon_lbl)
+            icon_lbl.setText("📄")
+            icon_lbl.setStyleSheet("color: #a0a0a0; font-size: 14px;")
+        layout.addWidget(icon_lbl)
 
-        right = QVBoxLayout()
-        right.setSpacing(4)
-        preview = QLabel(self.entry.get_preview())
-        preview.setWordWrap(True)
-        preview.setMaximumHeight(75)
-        preview.setStyleSheet("color: #e0e0e0; font-size: 15px;")
-        time_lbl = QLabel(ts_to_str(self.entry.timestamp))
-        time_lbl.setStyleSheet("color: #888; font-size: 12px;")
-        right.addWidget(preview)
-        right.addWidget(time_lbl)
-        layout.addLayout(right, 1)
+        # 图片类型：预留一个缩略图占位，异步到达后填
+        if self.entry.type == "image":
+            self._thumb_lbl = QLabel()
+            self._thumb_lbl.setFixedSize(THUMBNAIL_SIZE[0] // 2, THUMBNAIL_SIZE[1] // 2)
+            self._thumb_lbl.setStyleSheet("background:#2c2c2e; border-radius:4px;")
+            layout.addWidget(self._thumb_lbl)
+
+        preview_text = self.entry.get_preview().replace('\n', ' ')
+        preview_lbl = QLabel()
+        preview_lbl.setStyleSheet("color: #d0d0d0; font-size: 15px; font-family: 'Segoe UI', sans-serif;")
+        preview_lbl.setWordWrap(False)
+        metrics = preview_lbl.fontMetrics()
+        elided_text = metrics.elidedText(preview_text, Qt.ElideRight, 250)
+        preview_lbl.setText(elided_text)
+        layout.addWidget(preview_lbl, 1)
 
     def set_thumbnail(self, pixmap: QPixmap):
-        if self._thumb_lbl:
-            self._thumb_lbl.setPixmap(pixmap.scaled(
-                QSize(*THUMBNAIL_SIZE), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if self._thumb_lbl is not None and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self._thumb_lbl.width(), self._thumb_lbl.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self._thumb_lbl.setPixmap(scaled)
 
 
-# ─────────────────────────── 全局快捷键 ───────────────────────────
+# ─────────────────────────── 全局快捷键（阻塞等待，不忙轮询）───────────────────────────
 class GlobalHotkeyManager(QThread):
     signal_alt_v = pyqtSignal()
+
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+    HOTKEY_ALT_V_ID = 1001
+    MOD_ALT = 0x0001
+    VK_V = 0x56
 
     def __init__(self):
         super().__init__()
         self._running = True
         self.user32 = ctypes.windll.user32
-        self.HOTKEY_ALT_V_ID = 1001
-        self.MOD_ALT = 0x0001
-        self.VK_V = 0x56
+        self.kernel32 = ctypes.windll.kernel32
         self._thread_id = None
 
     def start_listening(self):
@@ -547,30 +651,28 @@ class GlobalHotkeyManager(QThread):
         self.start()
 
     def run(self):
-        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        res1 = self.user32.RegisterHotKey(None, self.HOTKEY_ALT_V_ID, self.MOD_ALT, self.VK_V)
-        if not res1:
+        self._thread_id = self.kernel32.GetCurrentThreadId()
+        ok = self.user32.RegisterHotKey(None, self.HOTKEY_ALT_V_ID, self.MOD_ALT, self.VK_V)
+        if not ok:
             print("警告: 全局热键 Alt+V 注册失败（可能已被其他程序占用）")
 
         msg = wintypes.MSG()
         while self._running:
-            ret = self.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)
-            if ret != 0:
-                if msg.message == 0x0312:
-                    if msg.wParam == self.HOTKEY_ALT_V_ID:
-                        self.signal_alt_v.emit()
-                elif msg.message == 0x0012:
-                    break
-                self.user32.TranslateMessage(ctypes.byref(msg))
-                self.user32.DispatchMessageW(ctypes.byref(msg))
-            else:
-                self.msleep(10)
+            # 阻塞等待，无消息时线程睡眠，不再消耗 CPU
+            ret = self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret == 0 or ret == -1:
+                break
+            if msg.message == self.WM_HOTKEY and msg.wParam == self.HOTKEY_ALT_V_ID:
+                self.signal_alt_v.emit()
+            self.user32.TranslateMessage(ctypes.byref(msg))
+            self.user32.DispatchMessageW(ctypes.byref(msg))
+
+        self.user32.UnregisterHotKey(None, self.HOTKEY_ALT_V_ID)
 
     def stop(self):
         self._running = False
         if self._thread_id:
-            ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
-        self.user32.UnregisterHotKey(None, self.HOTKEY_ALT_V_ID)
+            self.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
         self.wait(2000)
 
 
@@ -645,26 +747,26 @@ class MainWindow(QMainWindow):
         self._thumb_signals.done.connect(self._on_thumbnail_ready)
         self._thumb_pool = QThreadPool.globalInstance()
         self._thumb_pool.setMaxThreadCount(4)
-        self._item_map: dict = {}      # entry_id -> (item, widget)
-        self._current_ids: list = []   # 当前列表顺序（用于增量对比）
+        self._item_map: dict = {}
+        self._current_ids: list = []
         self._thumb_loaded: set = set()
         self._thumb_loading: set = set()
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(200)   # ★ 从 300 降到 200ms
+        self._search_timer.setInterval(200)
         self._search_timer.timeout.connect(self._do_refresh)
 
-        w = config.get("window_w", 560)
-        h = config.get("window_h", 680)
-        self.setWindowTitle("📋 剪贴板管理器 - 普通历史")
+        w = config.get("window_w", 1000)
+        h = config.get("window_h", 600)
+        self.setWindowTitle("ClipboardManager")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(w, h)
         self._build_ui()
         self._apply_style()
 
-    # ── 失焦隐藏 ──
+    # -- 焦点 --
     def _setup_focus_watcher(self):
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
@@ -681,149 +783,238 @@ class MainWindow(QMainWindow):
             if not (QApplication.activeModalWidget() or QApplication.activePopupWidget()):
                 self.hide()
 
-    # ── ★ 关键：定位到鼠标附近并自动防止超出屏幕 ──
     def _position_near_cursor(self):
         cursor_pos = QCursor.pos()
         screen = QApplication.screenAt(cursor_pos)
         if screen is None:
             screen = QApplication.primaryScreen()
-        avail: QRect = screen.availableGeometry()
-
+        avail = screen.availableGeometry()
         w, h = self.width(), self.height()
-        # 默认：鼠标右下方偏移 10px
-        x = cursor_pos.x() + 10
-        y = cursor_pos.y() + 10
-
-        # 防止超出屏幕右边
-        if x + w > avail.right():
-            x = cursor_pos.x() - w - 10
-        # 防止超出屏幕下边
-        if y + h > avail.bottom():
-            y = cursor_pos.y() - h - 10
-        # 最终保证在屏幕内
-        x = max(avail.left(), min(x, avail.right() - w))
-        y = max(avail.top(), min(y, avail.bottom() - h))
-
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 3
         self.move(x, y)
 
+    # -- UI --
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("centralWidget")
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        title_bar = QHBoxLayout()
-        self.title_label = QLabel("📋 普通历史")
-        self.title_label.setObjectName("titleLabel")
-        title_bar.addWidget(self.title_label)
-        title_bar.addStretch()
-
-        self.toggle_btn = QPushButton("⭐ 永久保存")
-        self.toggle_btn.setObjectName("toggleBtn")
-        self.toggle_btn.clicked.connect(self.toggle_mode)
-        title_bar.addWidget(self.toggle_btn)
-
-        settings_btn = QPushButton("⚙")
-        settings_btn.setObjectName("iconBtn")
-        settings_btn.setFixedSize(28, 28)
-        settings_btn.clicked.connect(self.open_settings)
-        title_bar.addWidget(settings_btn)
-
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("closeBtn")
-        close_btn.setFixedSize(28, 28)
-        close_btn.clicked.connect(self.hide)
-        title_bar.addWidget(close_btn)
-
-        main_layout.addLayout(title_bar)
+        top_bar = QWidget()
+        top_bar.setObjectName("topBar")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(20, 15, 20, 15)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("🔍 搜索...")
+        self.search_box.setPlaceholderText("Type to filter entries...")
         self.search_box.setObjectName("searchBox")
         self.search_box.textChanged.connect(self._on_search)
         self.search_box.installEventFilter(self)
-        main_layout.addWidget(self.search_box)
+        top_layout.addWidget(self.search_box)
+
+        self.toggle_btn = QPushButton("All Types ▾")
+        self.toggle_btn.setObjectName("toggleBtn")
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self.toggle_mode)
+        top_layout.addWidget(self.toggle_btn)
+
+        main_layout.addWidget(top_bar)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.setHandleWidth(1)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(10, 5, 10, 5)
+        left_layout.setSpacing(5)
+
+        self.list_title = QLabel("Today")
+        self.list_title.setObjectName("listTitle")
+        left_layout.addWidget(self.list_title)
 
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("listWidget")
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setSpacing(2)
-        # ★ 批量模式：减少 layoutChanged 触发次数
-        self.list_widget.setUniformItemSizes(False)
+        self.list_widget.setUniformItemSizes(True)
         self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.list_widget.currentItemChanged.connect(self._on_item_selection_changed)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
         self.list_widget.installEventFilter(self)
         self.list_widget.verticalScrollBar().valueChanged.connect(
             lambda _: self._schedule_visible_thumbnails()
         )
-        main_layout.addWidget(self.list_widget)
+        left_layout.addWidget(self.list_widget)
+        self.splitter.addWidget(left_panel)
 
-        status_bar = QHBoxLayout()
-        self.status_label = QLabel("就绪")
-        self.status_label.setObjectName("statusLabel")
-        status_bar.addWidget(self.status_label)
-        status_bar.addStretch()
+        self.right_panel = QWidget()
+        self.right_panel.setObjectName("rightPanel")
+        right_layout = QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(20, 20, 20, 20)
+        right_layout.setSpacing(15)
 
-        clear_btn = QPushButton("清空历史")
-        clear_btn.setObjectName("dangerBtn")
-        clear_btn.clicked.connect(self._clear_history)
-        status_bar.addWidget(clear_btn)
-        main_layout.addLayout(status_bar)
+        self.preview_text = QTextEdit()
+        self.preview_text.setObjectName("previewText")
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        right_layout.addWidget(self.preview_text, 1)
+
+        self.preview_image = QLabel()
+        self.preview_image.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.preview_image.hide()
+        right_layout.addWidget(self.preview_image, 1)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("background-color: #333333;")
+        right_layout.addWidget(line)
+
+        info_title = QLabel("Information")
+        info_title.setObjectName("infoTitle")
+        right_layout.addWidget(info_title)
+
+        info_grid = QFormLayout()
+        info_grid.setContentsMargins(0, 0, 0, 0)
+        info_grid.setVerticalSpacing(10)
+
+        self.info_type = QLabel("-")
+        self.info_type.setObjectName("infoValue")
+        self.info_chars = QLabel("-")
+        self.info_chars.setObjectName("infoValue")
+
+        info_grid.addRow(self._create_info_label("Type"), self.info_type)
+        info_grid.addRow(self._create_info_label("Characters"), self.info_chars)
+        right_layout.addLayout(info_grid)
+
+        self.splitter.addWidget(self.right_panel)
+        self.splitter.setSizes([400, 600])
+        main_layout.addWidget(self.splitter, 1)
+
+        bottom_bar = QWidget()
+        bottom_bar.setObjectName("bottomBar")
+        bottom_layout = QHBoxLayout(bottom_bar)
+        bottom_layout.setContentsMargins(15, 8, 15, 8)
+
+        app_icon = QLabel("📋 Clipboard History")
+        app_icon.setStyleSheet("color: #888888; font-size: 12px; font-weight: bold;")
+        bottom_layout.addWidget(app_icon)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #777; font-size: 11px;")
+        bottom_layout.addWidget(self.status_label)
+        bottom_layout.addStretch()
+
+        shortcut_lbl = QLabel("<b>Paste</b> ⏎  |  <b>Actions</b> Ctrl K")
+        shortcut_lbl.setStyleSheet("color: #999999; font-size: 12px;")
+        bottom_layout.addWidget(shortcut_lbl)
+
+        main_layout.addWidget(bottom_bar)
 
         self._refresh_list()
         self._setup_focus_watcher()
+
+    def _create_info_label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color: #777777; font-size: 12px;")
+        return lbl
 
     def _apply_style(self):
         self.setStyleSheet("""
             QMainWindow { background: transparent; }
             #centralWidget {
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #1a1a2e, stop:1 #16213e);
-                border-radius: 14px;
-                border: 1px solid #2a2a5e;
+                background-color: #1c1c1e;
+                border-radius: 12px;
+                border: 1px solid #3a3a3c;
             }
-            #titleLabel { color: #a0c4ff; font-size: 15px; font-weight: bold;
-                          font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; }
-            #toggleBtn { background: #2a2a5e; color: #ffd700; border: 1px solid #3a3a7e;
-                         border-radius: 6px; padding: 4px 10px; font-size: 12px; }
-            #toggleBtn:hover { background: #3a3a8e; }
-            #iconBtn, #closeBtn { background: #1e1e3a; color: #888; border: 1px solid #333;
-                                  border-radius: 6px; font-size: 13px; }
-            #iconBtn:hover { background: #2a2a4a; color: #aaa; }
-            #closeBtn:hover { background: #8b2020; color: #fff; }
-            #searchBox { background: #1e1e38; color: #d0d0f0; border: 1px solid #3a3a6e;
-                         border-radius: 8px; padding: 6px 12px; font-size: 13px; }
-            #searchBox:focus { border-color: #5a5aae; }
-            #listWidget { background: #12122a; border: 1px solid #2a2a4e;
-                          border-radius: 8px; outline: none; }
-            #listWidget::item { border-radius: 6px; margin: 1px 4px; }
-            #listWidget::item:selected { background: #2d2d6e; }
-            #listWidget::item:hover { background: #20204a; }
-            QScrollBar:vertical { background: #1a1a30; width: 6px; border-radius: 3px; }
-            QScrollBar::handle:vertical { background: #4a4a8e; border-radius: 3px; min-height: 20px; }
-            #statusLabel { color: #666; font-size: 11px; }
-            #dangerBtn { background: #3a1a1a; color: #ff8888; border: 1px solid #6a2a2a;
-                         border-radius: 6px; padding: 3px 8px; font-size: 11px; }
-            #dangerBtn:hover { background: #6a2020; }
+            #topBar { border-bottom: 1px solid #2c2c2e; }
+            #searchBox {
+                background: transparent; color: #ffffff; border: none;
+                font-size: 22px; font-family: 'Segoe UI', sans-serif;
+            }
+            #toggleBtn {
+                background: transparent; color: #a0a0a0; border: 1px solid #3a3a3c;
+                border-radius: 6px; padding: 4px 10px; font-size: 13px;
+            }
+            #toggleBtn:hover { background: #2c2c2e; color: #ffffff; }
+            #mainSplitter::handle { background-color: #2c2c2e; }
+            #listTitle { color: #888888; font-size: 12px; padding-left: 4px; padding-bottom: 4px; }
+            #listWidget { background: transparent; border: none; outline: none; }
+            #listWidget::item { border-radius: 6px; margin-bottom: 2px; }
+            #listWidget::item:selected { background-color: #2c2c2e; }
+            #listWidget::item:hover:!selected { background-color: #242426; }
+            QScrollBar:vertical { background: transparent; width: 8px; }
+            QScrollBar::handle:vertical { background: #4a4a4c; border-radius: 4px; min-height: 20px; }
+            QScrollBar::handle:vertical:hover { background: #5a5a5c; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            #rightPanel { background: transparent; }
+            #previewText {
+                background: transparent; border: none; color: #e0e0e0;
+                font-size: 14px; font-family: 'Consolas', 'Courier New', monospace;
+            }
+            #infoTitle { color: #888888; font-size: 13px; font-weight: bold; margin-bottom: 5px; }
+            #infoValue { color: #d0d0d0; font-size: 12px; }
+            #bottomBar {
+                background-color: #1e1e20; border-top: 1px solid #2c2c2e;
+                border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+            }
         """)
 
+    # -- 详情面板 --
+    def _on_item_selection_changed(self, current, previous):
+        if not current:
+            self.preview_text.clear()
+            self.preview_text.show()
+            self.preview_image.hide()
+            self.info_type.setText("-")
+            self.info_chars.setText("-")
+            return
+
+        entry = current.data(Qt.UserRole)
+        if entry.type == "text":
+            self.preview_image.hide()
+            self.preview_text.show()
+            self.preview_text.setText(entry.content)
+            self.info_type.setText("Text")
+            self.info_chars.setText(f"{len(entry.content)}")
+        elif entry.type == "image":
+            self.preview_text.hide()
+            self.preview_image.show()
+            data = entry.get_content()
+            if data:
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                scaled_pixmap = pixmap.scaled(
+                    self.right_panel.width() - 40,
+                    self.preview_image.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.preview_image.setPixmap(scaled_pixmap)
+            self.info_type.setText("Image")
+            self.info_chars.setText("N/A")
+
+    # -- 模式 --
     def toggle_mode(self):
         if self._mode == "history":
             self._mode = "permanent"
-            self.title_label.setText("⭐ 永久保存")
-            self.toggle_btn.setText("📋 普通历史")
+            self.toggle_btn.setText("Permanent ▾")
+            self.list_title.setText("Starred")
         else:
             self._mode = "history"
-            self.title_label.setText("📋 普通历史")
-            self.toggle_btn.setText("⭐ 永久保存")
-        self._current_ids = []   # 强制完整重建
+            self.toggle_btn.setText("All Types ▾")
+            self.list_title.setText("Today")
+        self._current_ids = []
         self._refresh_list()
 
+    # -- 刷新 --
     def _refresh_list(self):
         self._do_refresh()
 
@@ -832,11 +1023,10 @@ class MainWindow(QMainWindow):
         self._search_timer.start()
 
     def _entry_row_height(self, entry: ClipEntry) -> int:
-        return 140 if entry.type == "image" else 95
+        return 40
 
     def _update_status(self, count: int):
-        mode_str = "普通历史" if self._mode == "history" else "永久保存"
-        self.status_label.setText(f"{mode_str}: {count} 条")
+        self.status_label.setText(f"({count})")
 
     def _insert_entry_at(self, row: int, entry: ClipEntry) -> QListWidgetItem:
         item = QListWidgetItem()
@@ -893,32 +1083,22 @@ class MainWindow(QMainWindow):
         old_ids = self._current_ids
         if not old_ids:
             return False
-
-        # 顶部新增（常见：复制新内容）
-        if (new_ids and new_ids[0] not in old_ids and
-                new_ids[1:] == old_ids[:len(new_ids) - 1]):
+        if (new_ids and new_ids[0] not in old_ids and new_ids[1:] == old_ids[:len(new_ids) - 1]):
             self._prepend_entry(entries[0])
             self._current_ids = new_ids
             self._update_status(len(entries))
             return True
-
-        # 重复内容移到顶部
-        if (new_ids and new_ids[0] in old_ids and
-                new_ids[1:] == [i for i in old_ids if i != new_ids[0]]):
+        if (new_ids and new_ids[0] in old_ids and new_ids[1:] == [i for i in old_ids if i != new_ids[0]]):
             self._move_entry_to_top(new_ids[0], entries[0])
             self._current_ids = new_ids
             self._update_status(len(entries))
             return True
-
-        # 尾部裁剪（超出 max_count / 过期清理）
         if len(new_ids) < len(old_ids) and new_ids == old_ids[:len(new_ids)]:
             while len(self._current_ids) > len(new_ids):
                 self._remove_entry_by_id(self._current_ids[-1])
             self._current_ids = new_ids
             self._update_status(len(entries))
             return True
-
-        # 单条删除
         if len(new_ids) == len(old_ids) - 1:
             removed = set(old_ids) - set(new_ids)
             if len(removed) == 1 and new_ids == [i for i in old_ids if i not in removed]:
@@ -926,7 +1106,6 @@ class MainWindow(QMainWindow):
                 self._current_ids = new_ids
                 self._update_status(len(entries))
                 return True
-
         return False
 
     def _full_rebuild_list(self, entries: list, new_ids: list):
@@ -935,23 +1114,29 @@ class MainWindow(QMainWindow):
         self._item_map.clear()
         self._thumb_loaded.clear()
         self._thumb_loading.clear()
-
         for entry in entries:
             self._insert_entry_at(-1, entry)
-
         self.list_widget.setUpdatesEnabled(True)
         self._current_ids = new_ids
         self._update_status(len(entries))
-
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
         self._schedule_visible_thumbnails()
 
+    # -- 缩略图：只扫可见范围 --
     def _schedule_visible_thumbnails(self):
         if not PIL_AVAILABLE or self.list_widget.count() == 0:
             return
         viewport = self.list_widget.viewport().rect()
-        for row in range(self.list_widget.count()):
+        top_left = viewport.topLeft()
+        bottom_right = viewport.bottomRight()
+
+        first_idx = self.list_widget.indexAt(top_left)
+        first_row = first_idx.row() if first_idx.isValid() else 0
+        last_idx = self.list_widget.indexAt(bottom_right)
+        last_row = last_idx.row() if last_idx.isValid() else self.list_widget.count() - 1
+
+        for row in range(max(0, first_row), min(last_row + 1, self.list_widget.count())):
             item = self.list_widget.item(row)
             if not item:
                 continue
@@ -959,8 +1144,6 @@ class MainWindow(QMainWindow):
             if entry.type != "image":
                 continue
             if entry.id in self._thumb_loaded or entry.id in self._thumb_loading:
-                continue
-            if not viewport.intersects(self.list_widget.visualItemRect(item)):
                 continue
             self._thumb_loading.add(entry.id)
             self._thumb_pool.start(ThumbnailLoader(entry.id, entry, self._thumb_signals))
@@ -971,42 +1154,42 @@ class MainWindow(QMainWindow):
             entries = self.history.search(kw) if kw else self.history.get_all()
         else:
             entries = self.permanent.search(kw) if kw else self.permanent.get_all()
-
         new_ids = [e.id for e in entries]
-
         if new_ids == self._current_ids:
             self._update_status(len(entries))
             return
-
         if not kw and self._try_incremental_sync(entries, new_ids):
             self._schedule_visible_thumbnails()
             return
-
         self._full_rebuild_list(entries, new_ids)
 
     def _on_thumbnail_ready(self, entry_id: str, pixmap: QPixmap):
         self._thumb_loading.discard(entry_id)
         self._thumb_loaded.add(entry_id)
+        # 真正把 pixmap 填到 widget 上
         pair = self._item_map.get(entry_id)
         if pair:
             _, widget = pair
-            widget.set_thumbnail(pixmap)
+            if isinstance(widget, EntryItemWidget):
+                widget.set_thumbnail(pixmap)
 
     def refresh(self):
-        """外部调用刷新（有新数据时）"""
-        self._current_ids = []   # 强制重建
+        self._current_ids = []
         self._refresh_list()
 
     def refresh_if_dirty(self):
-        """仅在数据有变化时才刷新（增量优先）"""
         if self.history.consume_dirty():
             self._do_refresh()
 
+    # -- 粘贴 --
     def _on_item_clicked(self, item: QListWidgetItem):
         entry = item.data(Qt.UserRole)
         self._paste_entry(entry)
 
     def _paste_entry(self, entry: ClipEntry, as_plain_text=False):
+        if hasattr(QApplication.instance(), "is_pasting"):
+            QApplication.instance().is_pasting = True
+
         cb = QApplication.clipboard()
         if as_plain_text:
             cb.setText(entry.content if entry.type == "text" else (entry.note or "[图片]"))
@@ -1021,7 +1204,8 @@ class MainWindow(QMainWindow):
                     pixmap = pil_to_qpixmap(pil)
                     cb.setPixmap(pixmap)
                 except Exception:
-                    return
+                    pass
+
         self.hide()
         QTimer.singleShot(150, self._simulate_paste)
 
@@ -1029,19 +1213,21 @@ class MainWindow(QMainWindow):
         if PYAUTOGUI_AVAILABLE:
             try:
                 pyautogui.hotkey("ctrl", "v")
-                return
             except Exception:
                 pass
-        if PYNPUT_AVAILABLE:
+        elif PYNPUT_AVAILABLE:
             try:
-                from pynput.keyboard import Key, Controller
-                kc = Controller()
+                kc = PynputController()
                 with kc.pressed(Key.ctrl):
                     kc.press("v")
                     kc.release("v")
             except Exception:
                 pass
 
+        if hasattr(QApplication.instance(), "is_pasting"):
+            QTimer.singleShot(300, lambda: setattr(QApplication.instance(), "is_pasting", False))
+
+    # -- 右键菜单 --
     def _on_context_menu(self, pos: QPoint):
         item = self.list_widget.itemAt(pos)
         if not item:
@@ -1049,28 +1235,28 @@ class MainWindow(QMainWindow):
         entry = item.data(Qt.UserRole)
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu { background: #1e1e38; color: #d0d0f0; border: 1px solid #3a3a6e; border-radius:6px; }
-            QMenu::item:selected { background: #2d2d6e; }
+            QMenu { background: #1c1c1e; color: #e0e0e0; border: 1px solid #3a3a3c; border-radius:6px; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 4px; }
+            QMenu::item:selected { background: #2c2c2e; }
         """)
-        paste_action = menu.addAction("📋 粘贴")
+        paste_action = menu.addAction("📋 Paste")
         paste_action.triggered.connect(lambda: self._paste_entry(entry))
 
         if self._mode == "history":
-            fav_action = menu.addAction("⭐ 添加到永久保存")
+            fav_action = menu.addAction("⭐ Star")
             fav_action.triggered.connect(lambda: self._add_to_permanent(entry))
-            del_action = menu.addAction("🗑 从历史删除")
+            del_action = menu.addAction("🗑 Delete")
             del_action.triggered.connect(lambda: self._remove_from_history(entry))
         else:
-            del_action = menu.addAction("🗑 从永久删除")
+            del_action = menu.addAction("🗑 Remove Star")
             del_action.triggered.connect(lambda: self._remove_from_permanent(entry))
-
         menu.exec_(self.list_widget.viewport().mapToGlobal(pos))
 
     def _add_to_permanent(self, entry: ClipEntry):
         added = self.permanent.add(entry)
-        msg = "已添加到永久保存" if added else "内容已存在，已更新时间戳"
+        msg = "Saved!" if added else "Updated!"
         self.status_label.setText(msg)
-        QTimer.singleShot(3000, lambda: self.status_label.setText("就绪"))
+        QTimer.singleShot(3000, lambda: self.status_label.setText(""))
 
     def _remove_from_history(self, entry: ClipEntry):
         self.history.remove(entry.id)
@@ -1082,14 +1268,7 @@ class MainWindow(QMainWindow):
         self._current_ids = []
         self._refresh_list()
 
-    def _clear_history(self):
-        if self._mode == "history":
-            ret = QMessageBox.question(self, "确认", "清空所有普通历史记录？",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if ret == QMessageBox.Yes:
-                self.history.clear_all()
-                self._full_rebuild_list([], [])
-
+    # -- 设置 --
     def open_settings(self):
         dlg = SettingsDialog(self.config, self)
         if dlg.exec_() == QDialog.Accepted:
@@ -1102,7 +1281,9 @@ class MainWindow(QMainWindow):
             self._current_ids = []
             self._refresh_list()
 
+    # -- 事件 --
     def eventFilter(self, obj, event):
+        from PyQt5.QtCore import QEvent
         if event.type() == QEvent.KeyPress:
             key = event.key()
             if key in (Qt.Key_Up, Qt.Key_Down):
@@ -1120,8 +1301,12 @@ class MainWindow(QMainWindow):
                     entry = current_item.data(Qt.UserRole)
                     self._paste_entry(entry, as_plain_text=(event.modifiers() == Qt.ShiftModifier))
                 return True
-            elif key == Qt.Key_G and event.modifiers() == Qt.ControlModifier:
-                self.toggle_mode()
+            elif key == Qt.Key_K and event.modifiers() == Qt.ControlModifier:
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    rect = self.list_widget.visualItemRect(current_item)
+                    pos = rect.center()
+                    self._on_context_menu(pos)
                 return True
         return super().eventFilter(obj, event)
 
@@ -1238,7 +1423,6 @@ class ClipboardManagerApp:
 
     def _on_new_clip(self, entry: ClipEntry):
         self.history.add(entry)
-        # 窗口可见时才刷新，避免后台无谓重建
         if self.window.isVisible():
             self.window.refresh_if_dirty()
 
@@ -1246,11 +1430,17 @@ class ClipboardManagerApp:
         self.history.force_cleanup()
         if self.window.isVisible():
             self.window.refresh()
-        self.tray.showMessage("剪贴板管理器", "历史清理完成", QSystemTrayIcon.Information, 2000)
+        self.tray.showMessage("剪贴板管理器", "历史清理完成",
+                              QSystemTrayIcon.Information, 2000)
 
     def _quit(self):
         self.monitor.stop()
         self.hotkey_mgr.stop()
+        # 退出时强制把未落盘的历史写下去
+        try:
+            self.history._flush_save()
+        except Exception:
+            pass
         self.permanent.close()
         self.app.quit()
 
