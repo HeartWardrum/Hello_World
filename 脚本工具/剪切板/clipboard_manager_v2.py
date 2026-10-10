@@ -1,14 +1,12 @@
 """
-轻量级剪贴板管理工具 v3 - 性能强化版
-基于 v2 的进一步优化：
-  1. HistoryStore.add 不再 O(n) 重建索引；hash_map 改为 hash -> entry
-  2. 落盘防抖（1s 合并），退出时强制刷盘
-  3. 剪贴板图片异步编码 + 大图自动降采样，避免阻塞 UI
-  4. 缩略图真正显示（原版 set_thumbnail 是空实现）
-  5. 可见区缩略图用 indexAt 精确定位，不再全量遍历
-  6. 热键线程 GetMessageW 阻塞等待，去掉 10ms 忙轮询
-  7. PermanentStore 搜索走 SQL LIKE
-  8. 移除无意义的 _keep_alive 心跳
+轻量级剪贴板管理工具 v3.2 - 热键修复与性能优化版
+基于 v3 的增强：
+  1. 全局热键 Alt+V 可配置（Alt+V / Ctrl+Shift+V / ... 任意组合）
+  2. 窗口内快捷键 Ctrl+K（操作菜单）、Ctrl+G（切换模式）可配置
+  3. 快捷键支持禁用（清空即禁用）
+  4. 全局热键运行时重注册，注册失败托盘提示
+  5. 修复 poll_ms 保存后不生效的问题
+其余逻辑与 v3 保持一致。
 """
 
 import sys
@@ -29,14 +27,15 @@ from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QPushButton, QLabel,
     QSystemTrayIcon, QMenu, QAction,
     QMessageBox, QDialog, QCheckBox, QSpinBox, QFormLayout,
-    QSplitter, QTextEdit, QFrame,
+    QSplitter, QTextEdit, QFrame, QShortcut,
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, QPoint, QSettings,
-    QRunnable, QThreadPool, pyqtSlot, QObject,
+    QRunnable, QThreadPool, pyqtSlot, QObject, QBuffer, QIODevice,
 )
 from PyQt5.QtGui import (
     QIcon, QPixmap, QImage, QColor, QPainter, QFont, QCursor,
+    QKeySequence,
 )
 
 try:
@@ -77,6 +76,10 @@ DEFAULT_CONFIG = {
     "poll_ms": 800,
     "window_w": 900,
     "window_h": 680,
+    # 快捷键：空字符串 = 禁用
+    "hotkey_global": "alt+v",     # 全局：显示/隐藏
+    "hotkey_actions": "ctrl+k",   # 面板：打开操作菜单
+    "hotkey_mode": "ctrl+g",      # 面板：切换历史/收藏
 }
 
 
@@ -113,7 +116,7 @@ def ts_to_str(ts: float) -> str:
 def load_config() -> dict:
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             return {**DEFAULT_CONFIG, **cfg}
         except Exception:
@@ -122,11 +125,117 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
+    """原子写入配置，避免异常退出造成配置文件损坏。"""
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception:
-        pass
+        tmp_path = CONFIG_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception as ex:
+        print(f"保存配置失败: {ex}")
+
+
+# ─────────────────────────── 快捷键工具 ───────────────────────────
+def parse_qt_shortcut(s: str):
+    """'ctrl+k' → (key, modifiers)。失败返回 (0, Qt.NoModifier)。"""
+    if not s:
+        return 0, Qt.NoModifier
+    seq = QKeySequence(s)
+    if seq.isEmpty():
+        return 0, Qt.NoModifier
+    combo = seq[0]
+    key = combo & ~Qt.KeyboardModifierMask
+    mods = combo & Qt.KeyboardModifierMask
+    return int(key), mods
+
+
+def normalize_shortcut_text(s: str) -> str:
+    """统一成 'Ctrl+K' 展示形式。"""
+    if not s:
+        return ""
+    return QKeySequence(s).toString(QKeySequence.NativeText)
+
+
+def qt_key_to_vk(key: int):
+    """Qt 主键 → Win32 虚拟键码。"""
+    if Qt.Key_A <= key <= Qt.Key_Z:
+        return key  # Qt 的 Key_A..Key_Z 恰好等于 ASCII 'A'..'Z'
+    if Qt.Key_0 <= key <= Qt.Key_9:
+        return key
+    if Qt.Key_F1 <= key <= Qt.Key_F24:
+        return 0x70 + (key - Qt.Key_F1)  # VK_F1 = 0x70
+    mapping = {
+        Qt.Key_Space: 0x20,
+        Qt.Key_Tab: 0x09,
+        Qt.Key_Return: 0x0D,
+        Qt.Key_Enter: 0x0D,
+        Qt.Key_Escape: 0x1B,
+        Qt.Key_Backspace: 0x08,
+        Qt.Key_Delete: 0x2E,
+        Qt.Key_Insert: 0x2D,
+        Qt.Key_Home: 0x24,
+        Qt.Key_End: 0x23,
+        Qt.Key_PageUp: 0x21,
+        Qt.Key_PageDown: 0x22,
+        Qt.Key_Left: 0x25,
+        Qt.Key_Up: 0x26,
+        Qt.Key_Right: 0x27,
+        Qt.Key_Down: 0x28,
+        Qt.Key_Pause: 0x13,
+        Qt.Key_Print: 0x2C,
+        Qt.Key_CapsLock: 0x14,
+        Qt.Key_NumLock: 0x90,
+        Qt.Key_ScrollLock: 0x91,
+        Qt.Key_Menu: 0x5D,
+        Qt.Key_Minus: 0xBD,
+        Qt.Key_Equal: 0xBB,
+        Qt.Key_BracketLeft: 0xDB,
+        Qt.Key_BracketRight: 0xDD,
+        Qt.Key_Backslash: 0xDC,
+        Qt.Key_Semicolon: 0xBA,
+        Qt.Key_Apostrophe: 0xDE,
+        Qt.Key_Comma: 0xBC,
+        Qt.Key_Period: 0xBE,
+        Qt.Key_Slash: 0xBF,
+        Qt.Key_QuoteLeft: 0xC0,
+    }
+    # Shift+数字/标点在 Qt 中可能以符号键值表示，映射回对应的物理主键。
+    shifted_ascii = {
+        Qt.Key_Exclam: ord("1"), Qt.Key_At: ord("2"), Qt.Key_NumberSign: ord("3"),
+        Qt.Key_Dollar: ord("4"), Qt.Key_Percent: ord("5"), Qt.Key_AsciiCircum: ord("6"),
+        Qt.Key_Ampersand: ord("7"), Qt.Key_Asterisk: ord("8"),
+        Qt.Key_ParenLeft: ord("9"), Qt.Key_ParenRight: ord("0"),
+        Qt.Key_Underscore: 0xBD, Qt.Key_Plus: 0xBB,
+        Qt.Key_BraceLeft: 0xDB, Qt.Key_BraceRight: 0xDD, Qt.Key_Bar: 0xDC,
+        Qt.Key_Colon: 0xBA, Qt.Key_QuoteDbl: 0xDE, Qt.Key_Less: 0xBC,
+        Qt.Key_Greater: 0xBE, Qt.Key_Question: 0xBF, Qt.Key_AsciiTilde: 0xC0,
+    }
+    return mapping.get(key, shifted_ascii.get(key))
+
+
+def parse_win_hotkey(s: str):
+    """'alt+v' → (modifiers, vk)。失败返回 (None, None)。"""
+    if not s:
+        return None, None
+    seq = QKeySequence(s)
+    if seq.isEmpty():
+        return None, None
+    combo = seq[0]
+    mods = 0
+    if combo & Qt.ControlModifier:
+        mods |= 0x0002  # MOD_CONTROL
+    if combo & Qt.AltModifier:
+        mods |= 0x0001  # MOD_ALT
+    if combo & Qt.ShiftModifier:
+        mods |= 0x0004  # MOD_SHIFT
+    if combo & Qt.MetaModifier:
+        mods |= 0x0008  # MOD_WIN
+
+    key = combo & ~Qt.KeyboardModifierMask
+    vk = qt_key_to_vk(int(key))
+    if vk is None or mods == 0:
+        return None, None
+    return mods, vk
 
 
 # ─────────────────────────── 数据模型 ───────────────────────────
@@ -175,6 +284,17 @@ class ClipEntry:
             return self._hash_cache
         if self.type == "text":
             self._hash_cache = compute_md5(self.content.encode("utf-8"))
+        elif self._lazy and self._image_path and os.path.isfile(self._image_path):
+            # 启动加载历史时只流式计算哈希，不把全部图片内容常驻内存。
+            digest = hashlib.md5()
+            try:
+                with open(self._image_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                self._hash_cache = digest.hexdigest()
+            except OSError:
+                self._ensure_loaded()
+                self._hash_cache = compute_md5(self.content or b"")
         else:
             self._ensure_loaded()
             self._hash_cache = compute_md5(self.content or b"")
@@ -190,24 +310,18 @@ class ClipEntry:
 
 # ─────────────────────────── 历史存储 ───────────────────────────
 class HistoryStore:
-    """
-    v3 优化：
-      - _hash_map: hash -> ClipEntry  （不再维护下标，避免每次 add O(n) 重建）
-      - 落盘防抖：多次变更 1s 内合并为一次写盘
-    """
     SAVE_DEBOUNCE_SEC = 1.0
 
     def __init__(self, max_count=100, max_days=30):
         self.max_count = max_count
         self.max_days = max_days
-        self._entries: list = []                # 有序，index 0 最新
-        self._hash_map: dict = {}               # hash -> ClipEntry
+        self._entries: list = []
+        self._hash_map: dict = {}
         self._dirty = False
         self._save_timer: threading.Timer = None
         self._save_lock = threading.Lock()
         self.load()
 
-    # -- 查询 --
     def get_all(self) -> list:
         return list(self._entries)
 
@@ -217,7 +331,6 @@ class HistoryStore:
                 if (e.type == "text" and kw in e.content.lower()) or
                    (e.type == "image" and kw in (e.note or "").lower())]
 
-    # -- 修改 --
     def add(self, entry: ClipEntry) -> bool:
         h = entry.get_hash()
         existing = self._hash_map.get(h)
@@ -253,7 +366,6 @@ class HistoryStore:
     def force_cleanup(self):
         self._cleanup()
         self._mark_dirty()
-        # 立即写盘（用户主动动作）
         self._flush_save()
 
     def consume_dirty(self) -> bool:
@@ -265,7 +377,6 @@ class HistoryStore:
         self._dirty = True
         self._schedule_save()
 
-    # -- 清理 --
     def _cleanup(self):
         removed_any = False
         if self.max_count > 0 and len(self._entries) > self.max_count:
@@ -299,7 +410,6 @@ class HistoryStore:
             except Exception:
                 pass
 
-    # -- 落盘（防抖） --
     def _schedule_save(self):
         with self._save_lock:
             if self._save_timer is not None:
@@ -334,7 +444,6 @@ class HistoryStore:
                         continue
                 item["image_path"] = path
             data.append(item)
-        # 原子写：先写临时文件再 rename，避免崩溃损坏
         try:
             tmp = HISTORY_FILE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -355,7 +464,6 @@ class HistoryStore:
                                   item["id"], item.get("note", ""))
                 else:
                     path = item.get("image_path", "")
-                    # 不再 os.path.exists —— 懒加载阶段 open 失败会自然跳过
                     if not path:
                         continue
                     e = ClipEntry("image", None, item["timestamp"],
@@ -429,7 +537,6 @@ class PermanentStore:
         return result
 
     def search(self, keyword: str) -> list:
-        """SQL 层过滤，避免把全部 BLOB 拉进内存。"""
         kw = f"%{keyword.lower()}%"
         with self._lock:
             cur = self._conn.execute(
@@ -455,13 +562,12 @@ class PermanentStore:
         self._conn.close()
 
 
-# ─────────────────────────── 剪贴板监控（QTimer + 异步图片编码）───────────────────────────
+# ─────────────────────────── 剪贴板监控 ───────────────────────────
 class ImageEncodeSignals(QObject):
-    done = pyqtSignal(object)   # ClipEntry
+    done = pyqtSignal(object)
 
 
 class ImageEncodeTask(QRunnable):
-    """在工作线程里做 QImage → PIL → PNG 编码，避免大图阻塞 UI。"""
     def __init__(self, qimage_copy: QImage, signals: ImageEncodeSignals):
         super().__init__()
         self.qimage = qimage_copy
@@ -472,17 +578,18 @@ class ImageEncodeTask(QRunnable):
     def run(self):
         try:
             img = self.qimage
-            # 大图降采样
             if img.width() > MAX_IMAGE_DIM or img.height() > MAX_IMAGE_DIM:
                 img = img.scaled(MAX_IMAGE_DIM, MAX_IMAGE_DIM,
                                  Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            img = img.convertToFormat(QImage.Format_RGBA8888)
-            ptr = img.bits()
-            ptr.setsize(img.byteCount())
-            pil = Image.frombytes("RGBA", (img.width(), img.height()), bytes(ptr))
-            ba = BytesIO()
-            pil.save(ba, "PNG", optimize=False, compress_level=3)
-            data = ba.getvalue()
+            # QImage 原生编码，避免将整张图复制到 PIL 再编码，且不再依赖 Pillow 才能保存图片。
+            buffer = QBuffer()
+            if not buffer.open(QIODevice.WriteOnly):
+                raise RuntimeError("无法创建图片编码缓冲区")
+            if not img.save(buffer, "PNG", 3):
+                buffer.close()
+                raise RuntimeError("Qt PNG 编码失败")
+            data = bytes(buffer.data())
+            buffer.close()
             note = f"图片_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             entry = ClipEntry("image", data, note=note)
             self.signals.done.emit(entry)
@@ -501,6 +608,16 @@ class ClipboardChecker(QObject):
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self._check)
         self._cb = None
+        self._last_clipboard_seq = None
+        self._get_clipboard_sequence = None
+        if sys.platform == "win32":
+            try:
+                get_seq = ctypes.windll.user32.GetClipboardSequenceNumber
+                get_seq.argtypes = []
+                get_seq.restype = wintypes.DWORD
+                self._get_clipboard_sequence = get_seq
+            except Exception:
+                self._get_clipboard_sequence = None
         self._img_signals = ImageEncodeSignals()
         self._img_signals.done.connect(self.new_entry)
         self._img_pool = QThreadPool()
@@ -519,6 +636,12 @@ class ClipboardChecker(QObject):
 
     def _check(self):
         try:
+            # 大图片的 image()/scale/hash 很耗时。Windows 剪贴板序号未变化时直接返回。
+            if self._get_clipboard_sequence is not None:
+                seq = int(self._get_clipboard_sequence())
+                if self._last_clipboard_seq is not None and seq == self._last_clipboard_seq:
+                    return
+                self._last_clipboard_seq = seq
             if self._cb is None:
                 self._cb = QApplication.clipboard()
             mime = self._cb.mimeData()
@@ -527,7 +650,6 @@ class ClipboardChecker(QObject):
                 qimg = self._cb.image()
                 if qimg.isNull():
                     return
-                # 用缩略 hash 快速去重（避免每次大图全量 md5）
                 small = qimg.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation)
                 small = small.convertToFormat(QImage.Format_RGBA8888)
                 ptr = small.bits()
@@ -536,7 +658,6 @@ class ClipboardChecker(QObject):
                 if quick_hash == self._last_hash:
                     return
                 self._last_hash = quick_hash
-                # 拷贝一份 QImage 给工作线程（QImage 隐式共享，跨线程需 copy）
                 qimg_copy = qimg.copy()
                 self._img_pool.start(ImageEncodeTask(qimg_copy, self._img_signals))
             elif mime.hasText():
@@ -554,7 +675,7 @@ class ClipboardChecker(QObject):
 
 # ─────────────────────────── 异步缩略图加载 ───────────────────────────
 class ThumbnailSignals(QObject):
-    done = pyqtSignal(str, QPixmap)
+    done = pyqtSignal(str, QImage)
 
 
 class ThumbnailLoader(QRunnable):
@@ -572,12 +693,15 @@ class ThumbnailLoader(QRunnable):
             if not data:
                 return
             ba = BytesIO(data)
-            pil = Image.open(ba)
-            thumb = make_thumbnail(pil)
-            pixmap = pil_to_qpixmap(thumb)
-            self.signals.done.emit(self.entry_id, pixmap)
+            with Image.open(ba) as pil:
+                thumb = make_thumbnail(pil)
+                rgba = thumb.convert("RGBA")
+                raw = rgba.tobytes("raw", "RGBA")
+                image = QImage(raw, rgba.width, rgba.height, rgba.width * 4,
+                               QImage.Format_RGBA8888).copy()
+            self.signals.done.emit(self.entry_id, image)
         except Exception:
-            pass
+            self.signals.done.emit(self.entry_id, QImage())
 
 
 # ─────────────────────────── 条目Widget ───────────────────────────
@@ -604,7 +728,6 @@ class EntryItemWidget(QWidget):
             icon_lbl.setStyleSheet("color: #a0a0a0; font-size: 14px;")
         layout.addWidget(icon_lbl)
 
-        # 图片类型：预留一个缩略图占位，异步到达后填
         if self.entry.type == "image":
             self._thumb_lbl = QLabel()
             self._thumb_lbl.setFixedSize(THUMBNAIL_SIZE[0] // 2, THUMBNAIL_SIZE[1] // 2)
@@ -629,51 +752,161 @@ class EntryItemWidget(QWidget):
             self._thumb_lbl.setPixmap(scaled)
 
 
-# ─────────────────────────── 全局快捷键（阻塞等待，不忙轮询）───────────────────────────
+# ─────────────────────────── 全局快捷键（可重注册）───────────────────────────
 class GlobalHotkeyManager(QThread):
-    signal_alt_v = pyqtSignal()
+    signal_triggered = pyqtSignal()
+    signal_register_failed = pyqtSignal(str)
 
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
-    HOTKEY_ALT_V_ID = 1001
-    MOD_ALT = 0x0001
-    VK_V = 0x56
+    WM_APP_RELOAD_HOTKEY = 0x8000 + 1
+    HOTKEY_ID = 1001
+    MOD_NOREPEAT = 0x4000
+    PM_NOREMOVE = 0x0000
 
-    def __init__(self):
+    def __init__(self, hotkey_str: str = "alt+v"):
         super().__init__()
         self._running = True
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self._thread_id = None
+        self._hotkey_str = hotkey_str or ""
+        self._mods = None
+        self._vk = None
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._configure_winapi()
+
+    def _configure_winapi(self):
+        """为 Win32 API 声明正确的参数/返回类型，避免 64 位环境的类型截断。"""
+        try:
+            self.user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int,
+                                                   wintypes.UINT, wintypes.UINT]
+            self.user32.RegisterHotKey.restype = wintypes.BOOL
+            self.user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+            self.user32.UnregisterHotKey.restype = wintypes.BOOL
+            self.user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT,
+                                                       wintypes.WPARAM, wintypes.LPARAM]
+            self.user32.PostThreadMessageW.restype = wintypes.BOOL
+            self.user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                                wintypes.UINT, wintypes.UINT]
+            self.user32.GetMessageW.restype = ctypes.c_int
+            self.user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                                 wintypes.UINT, wintypes.UINT, wintypes.UINT]
+            self.user32.PeekMessageW.restype = wintypes.BOOL
+            self.user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            self.user32.TranslateMessage.restype = wintypes.BOOL
+            self.user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            self.user32.DispatchMessageW.restype = ctypes.c_ssize_t
+            self.kernel32.GetCurrentThreadId.argtypes = []
+            self.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        except Exception:
+            # 允许在部分 Wine/兼容环境中继续尝试使用 API。
+            pass
 
     def start_listening(self):
-        self.daemon = True
         self.start()
 
+    def update_hotkey(self, hotkey_str: str):
+        """线程安全更新配置；消息队列就绪后再投递重注册消息。"""
+        with self._lock:
+            self._hotkey_str = hotkey_str or ""
+        if not self._ready.is_set():
+            # 启动阶段的更新会由 run() 读取最新配置，不丢失修改。
+            return
+        thread_id = self._thread_id
+        if thread_id:
+            ok = self.user32.PostThreadMessageW(
+                thread_id, self.WM_APP_RELOAD_HOTKEY, 0, 0
+            )
+            if not ok:
+                # 通常意味着线程正在退出；不在 UI 线程直接调用 RegisterHotKey。
+                self.signal_register_failed.emit(hotkey_str or "")
+
+    def _register(self):
+        self.user32.UnregisterHotKey(None, self.HOTKEY_ID)
+        with self._lock:
+            s = self._hotkey_str
+        mods, vk = parse_win_hotkey(s)
+        if mods is None:
+            self._mods = self._vk = None  # 空字符串或不支持的键组合：禁用全局热键
+            return
+        ok = self.user32.RegisterHotKey(
+            None, self.HOTKEY_ID, mods | self.MOD_NOREPEAT, vk
+        )
+        if ok:
+            self._mods, self._vk = mods, vk
+        else:
+            self._mods = self._vk = None
+            self.signal_register_failed.emit(s)
+
     def run(self):
-        self._thread_id = self.kernel32.GetCurrentThreadId()
-        ok = self.user32.RegisterHotKey(None, self.HOTKEY_ALT_V_ID, self.MOD_ALT, self.VK_V)
-        if not ok:
-            print("警告: 全局热键 Alt+V 注册失败（可能已被其他程序占用）")
-
         msg = wintypes.MSG()
-        while self._running:
-            # 阻塞等待，无消息时线程睡眠，不再消耗 CPU
-            ret = self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret == 0 or ret == -1:
-                break
-            if msg.message == self.WM_HOTKEY and msg.wParam == self.HOTKEY_ALT_V_ID:
-                self.signal_alt_v.emit()
-            self.user32.TranslateMessage(ctypes.byref(msg))
-            self.user32.DispatchMessageW(ctypes.byref(msg))
-
-        self.user32.UnregisterHotKey(None, self.HOTKEY_ALT_V_ID)
+        # 关键修复：先创建线程消息队列，再公开 thread_id。
+        # 否则启动瞬间 PostThreadMessage 可能因队列不存在而失败。
+        self.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, self.PM_NOREMOVE)
+        self._thread_id = int(self.kernel32.GetCurrentThreadId())
+        self._ready.set()
+        self._register()
+        try:
+            while self._running:
+                ret = self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret <= 0:
+                    break
+                if msg.message == self.WM_HOTKEY and msg.wParam == self.HOTKEY_ID:
+                    self.signal_triggered.emit()
+                elif msg.message == self.WM_APP_RELOAD_HOTKEY:
+                    self._register()
+                self.user32.TranslateMessage(ctypes.byref(msg))
+                self.user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            self.user32.UnregisterHotKey(None, self.HOTKEY_ID)
+            self._ready.clear()
+            self._thread_id = None
 
     def stop(self):
         self._running = False
-        if self._thread_id:
+        if self._ready.is_set() and self._thread_id:
             self.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
-        self.wait(2000)
+        if self.isRunning():
+            self.wait(2000)
+
+
+# ─────────────────────────── 快捷键录制控件 ───────────────────────────
+class ShortcutEdit(QLineEdit):
+    """点击后按下组合键即录制。按 Esc 清空（禁用）。"""
+
+    def __init__(self, value: str = "", parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setPlaceholderText("点击后按组合键… (Esc 清空)")
+        self._value = value or ""
+        self.setText(normalize_shortcut_text(self._value))
+
+    def value(self) -> str:
+        return self._value
+
+    def setValue(self, s: str):
+        self._value = s or ""
+        self.setText(normalize_shortcut_text(self._value))
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key_Escape:
+            self.setValue("")
+            return
+        # 只按修饰键不算
+        if key in (Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift, Qt.Key_Meta,
+                   Qt.Key_AltGr, Qt.Key_unknown):
+            return
+        mods = event.modifiers()
+        # 至少要有 Ctrl/Alt/Shift/Win 之一，避免单键误触
+        if not (mods & (Qt.ControlModifier | Qt.AltModifier |
+                        Qt.ShiftModifier | Qt.MetaModifier)):
+            return
+        seq = QKeySequence(mods | key)
+        portable = seq.toString(QKeySequence.PortableText).lower()
+        self.setValue(portable)
 
 
 # ─────────────────────────── 设置对话框 ───────────────────────────
@@ -682,7 +915,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.config = dict(config)
         self.setWindowTitle("设置")
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(420)
         self._build_ui()
 
     def _build_ui(self):
@@ -712,7 +945,22 @@ class SettingsDialog(QDialog):
         self.focus_hide_cb.setChecked(self.config.get("focus_hide", True))
         form.addRow("", self.focus_hide_cb)
 
+        # ── 快捷键 ──
+        self.hotkey_global_edit = ShortcutEdit(self.config.get("hotkey_global", "alt+v"))
+        form.addRow("全局：显示/隐藏:", self.hotkey_global_edit)
+
+        self.hotkey_actions_edit = ShortcutEdit(self.config.get("hotkey_actions", "ctrl+k"))
+        form.addRow("面板：操作菜单:", self.hotkey_actions_edit)
+
+        self.hotkey_mode_edit = ShortcutEdit(self.config.get("hotkey_mode", "ctrl+g"))
+        form.addRow("面板：切换模式:", self.hotkey_mode_edit)
+
+        hint = QLabel("提示：快捷键需至少含一个修饰键；清空即禁用。修改全局热键后立即生效。")
+        hint.setStyleSheet("color: #888888; font-size: 11px;")
+        hint.setWordWrap(True)
         layout.addLayout(form)
+        layout.addWidget(hint)
+
         btn_box = QHBoxLayout()
         ok_btn = QPushButton("保存")
         ok_btn.clicked.connect(self._save)
@@ -728,10 +976,51 @@ class SettingsDialog(QDialog):
         self.config["max_days"] = self.max_days_spin.value()
         self.config["focus_hide"] = self.focus_hide_cb.isChecked()
         self.config["poll_ms"] = self.poll_spin.value()
+        self.config["hotkey_global"] = self.hotkey_global_edit.value()
+        self.config["hotkey_actions"] = self.hotkey_actions_edit.value()
+        self.config["hotkey_mode"] = self.hotkey_mode_edit.value()
         self.accept()
 
     def get_config(self) -> dict:
         return self.config
+
+
+class ImagePreviewSignals(QObject):
+    done = pyqtSignal(str, QImage)
+
+
+class ImagePreviewLoader(QRunnable):
+    """后台读取/缩放预览图，只把 QImage 交回主线程。"""
+    def __init__(self, entry: ClipEntry, max_size, signals: ImagePreviewSignals):
+        super().__init__()
+        self.entry = entry
+        self.entry_id = entry.id
+        self.max_size = (max(1, int(max_size[0])), max(1, int(max_size[1])))
+        self.signals = signals
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            raw = self.entry.get_content()
+            if not raw:
+                return
+            if PIL_AVAILABLE:
+                with Image.open(BytesIO(raw)) as pil:
+                    pil.thumbnail(self.max_size, Image.LANCZOS)
+                    rgba = pil.convert("RGBA")
+                    buf = rgba.tobytes("raw", "RGBA")
+                    image = QImage(buf, rgba.width, rgba.height, rgba.width * 4,
+                                   QImage.Format_RGBA8888).copy()
+            else:
+                image = QImage.fromData(raw)
+                if not image.isNull():
+                    image = image.scaled(self.max_size[0], self.max_size[1],
+                                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if not image.isNull():
+                self.signals.done.emit(self.entry_id, image)
+        except Exception as ex:
+            print(f"图片预览加载失败: {ex}")
 
 
 # ─────────────────────────── 主窗口 ───────────────────────────
@@ -745,9 +1034,18 @@ class MainWindow(QMainWindow):
         self._search_keyword = ""
         self._thumb_signals = ThumbnailSignals()
         self._thumb_signals.done.connect(self._on_thumbnail_ready)
+        self._preview_signals = ImagePreviewSignals()
+        self._preview_signals.done.connect(self._on_preview_image_ready)
         self._thumb_pool = QThreadPool.globalInstance()
-        self._thumb_pool.setMaxThreadCount(4)
+        self._thumb_pool.setMaxThreadCount(max(2, min(4, self._thumb_pool.maxThreadCount())))
         self._item_map: dict = {}
+        self._current_preview_id = None
+        self._actions_shortcut = QShortcut(QKeySequence(), self)
+        self._actions_shortcut.setContext(Qt.WindowShortcut)
+        self._actions_shortcut.activated.connect(self._trigger_actions_shortcut)
+        self._mode_shortcut = QShortcut(QKeySequence(), self)
+        self._mode_shortcut.setContext(Qt.WindowShortcut)
+        self._mode_shortcut.activated.connect(self.toggle_mode)
         self._current_ids: list = []
         self._thumb_loaded: set = set()
         self._thumb_loading: set = set()
@@ -757,16 +1055,16 @@ class MainWindow(QMainWindow):
         self._search_timer.setInterval(200)
         self._search_timer.timeout.connect(self._do_refresh)
 
-        w = config.get("window_w", 1000)
-        h = config.get("window_h", 600)
+        w = config.get("window_w", 900)
+        h = config.get("window_h", 680)
         self.setWindowTitle("ClipboardManager")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(w, h)
         self._build_ui()
         self._apply_style()
+        self._apply_window_shortcuts()
 
-    # -- 焦点 --
     def _setup_focus_watcher(self):
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
@@ -794,7 +1092,6 @@ class MainWindow(QMainWindow):
         y = avail.y() + (avail.height() - h) // 3
         self.move(x, y)
 
-    # -- UI --
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("centralWidget")
@@ -912,14 +1209,24 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self.status_label)
         bottom_layout.addStretch()
 
-        shortcut_lbl = QLabel("<b>Paste</b> ⏎  |  <b>Actions</b> Ctrl K")
-        shortcut_lbl.setStyleSheet("color: #999999; font-size: 12px;")
-        bottom_layout.addWidget(shortcut_lbl)
+        self.shortcut_lbl = QLabel()
+        self.shortcut_lbl.setStyleSheet("color: #999999; font-size: 12px;")
+        bottom_layout.addWidget(self.shortcut_lbl)
+        self._update_shortcut_hint()
 
         main_layout.addWidget(bottom_bar)
 
         self._refresh_list()
         self._setup_focus_watcher()
+
+    def _update_shortcut_hint(self):
+        """底部提示随配置更新。"""
+        paste = "⏎"
+        actions = normalize_shortcut_text(self.config.get("hotkey_actions", "")) or "—"
+        mode = normalize_shortcut_text(self.config.get("hotkey_mode", "")) or "—"
+        self.shortcut_lbl.setText(
+            f"<b>Paste</b> {paste}  |  <b>Actions</b> {actions}  |  <b>Mode</b> {mode}"
+        )
 
     def _create_info_label(self, text):
         lbl = QLabel(text)
@@ -967,9 +1274,9 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    # -- 详情面板 --
     def _on_item_selection_changed(self, current, previous):
         if not current:
+            self._current_preview_id = None
             self.preview_text.clear()
             self.preview_text.show()
             self.preview_image.hide()
@@ -979,6 +1286,7 @@ class MainWindow(QMainWindow):
 
         entry = current.data(Qt.UserRole)
         if entry.type == "text":
+            self._current_preview_id = None
             self.preview_image.hide()
             self.preview_text.show()
             self.preview_text.setText(entry.content)
@@ -987,21 +1295,16 @@ class MainWindow(QMainWindow):
         elif entry.type == "image":
             self.preview_text.hide()
             self.preview_image.show()
-            data = entry.get_content()
-            if data:
-                pixmap = QPixmap()
-                pixmap.loadFromData(data)
-                scaled_pixmap = pixmap.scaled(
-                    self.right_panel.width() - 40,
-                    self.preview_image.height(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                self.preview_image.setPixmap(scaled_pixmap)
+            self.preview_image.clear()
+            self._current_preview_id = entry.id
             self.info_type.setText("Image")
             self.info_chars.setText("N/A")
+            max_w = max(1, self.right_panel.width() - 40)
+            max_h = max(1, self.preview_image.height() or self.right_panel.height() - 180)
+            self._thumb_pool.start(ImagePreviewLoader(
+                entry, (max_w, max_h), self._preview_signals
+            ))
 
-    # -- 模式 --
     def toggle_mode(self):
         if self._mode == "history":
             self._mode = "permanent"
@@ -1014,7 +1317,6 @@ class MainWindow(QMainWindow):
         self._current_ids = []
         self._refresh_list()
 
-    # -- 刷新 --
     def _refresh_list(self):
         self._do_refresh()
 
@@ -1123,7 +1425,6 @@ class MainWindow(QMainWindow):
             self.list_widget.setCurrentRow(0)
         self._schedule_visible_thumbnails()
 
-    # -- 缩略图：只扫可见范围 --
     def _schedule_visible_thumbnails(self):
         if not PIL_AVAILABLE or self.list_widget.count() == 0:
             return
@@ -1163,15 +1464,22 @@ class MainWindow(QMainWindow):
             return
         self._full_rebuild_list(entries, new_ids)
 
-    def _on_thumbnail_ready(self, entry_id: str, pixmap: QPixmap):
+    def _on_thumbnail_ready(self, entry_id: str, image: QImage):
         self._thumb_loading.discard(entry_id)
+        if image.isNull():
+            return
         self._thumb_loaded.add(entry_id)
-        # 真正把 pixmap 填到 widget 上
         pair = self._item_map.get(entry_id)
         if pair:
             _, widget = pair
             if isinstance(widget, EntryItemWidget):
-                widget.set_thumbnail(pixmap)
+                widget.set_thumbnail(QPixmap.fromImage(image))
+
+    def _on_preview_image_ready(self, entry_id: str, image: QImage):
+        # 用户快速切换条目时，丢弃过期任务的结果。
+        if entry_id != self._current_preview_id or image.isNull():
+            return
+        self.preview_image.setPixmap(QPixmap.fromImage(image))
 
     def refresh(self):
         self._current_ids = []
@@ -1181,7 +1489,6 @@ class MainWindow(QMainWindow):
         if self.history.consume_dirty():
             self._do_refresh()
 
-    # -- 粘贴 --
     def _on_item_clicked(self, item: QListWidgetItem):
         entry = item.data(Qt.UserRole)
         self._paste_entry(entry)
@@ -1227,7 +1534,6 @@ class MainWindow(QMainWindow):
         if hasattr(QApplication.instance(), "is_pasting"):
             QTimer.singleShot(300, lambda: setattr(QApplication.instance(), "is_pasting", False))
 
-    # -- 右键菜单 --
     def _on_context_menu(self, pos: QPoint):
         item = self.list_widget.itemAt(pos)
         if not item:
@@ -1268,8 +1574,8 @@ class MainWindow(QMainWindow):
         self._current_ids = []
         self._refresh_list()
 
-    # -- 设置 --
     def open_settings(self):
+        old_cfg = dict(self.config)
         dlg = SettingsDialog(self.config, self)
         if dlg.exec_() == QDialog.Accepted:
             new_cfg = dlg.get_config()
@@ -1278,10 +1584,40 @@ class MainWindow(QMainWindow):
             self.history.max_days = new_cfg["max_days"]
             self.history.force_cleanup()
             save_config(self.config)
+
+            # poll_ms 立即生效
+            if hasattr(self, "_on_poll_changed"):
+                self._on_poll_changed(new_cfg.get("poll_ms", 800))
+
+            # 全局热键若变更，通知外部重注册
+            if new_cfg.get("hotkey_global") != old_cfg.get("hotkey_global"):
+                if hasattr(self, "_on_global_hotkey_changed"):
+                    self._on_global_hotkey_changed(new_cfg.get("hotkey_global", ""))
+
+            # 窗口内快捷键也立即重绑，避免仅更新显示文本但实际仍使用旧绑定。
+            self._apply_window_shortcuts()
+
+            # 底部提示刷新
+            self._update_shortcut_hint()
+
             self._current_ids = []
             self._refresh_list()
 
-    # -- 事件 --
+    def _apply_window_shortcuts(self):
+        """更新窗口内快捷键；WindowShortcut 在窗口任意子控件有焦点时均可用。"""
+        actions = (self.config.get("hotkey_actions", "") or "").strip()
+        mode = (self.config.get("hotkey_mode", "") or "").strip()
+        self._actions_shortcut.setKey(QKeySequence(actions) if actions else QKeySequence())
+        self._mode_shortcut.setKey(QKeySequence(mode) if mode else QKeySequence())
+        self._actions_shortcut.setEnabled(bool(actions) and not QKeySequence(actions).isEmpty())
+        self._mode_shortcut.setEnabled(bool(mode) and not QKeySequence(mode).isEmpty())
+
+    def _trigger_actions_shortcut(self):
+        current_item = self.list_widget.currentItem()
+        if current_item:
+            rect = self.list_widget.visualItemRect(current_item)
+            self._on_context_menu(rect.center())
+
     def eventFilter(self, obj, event):
         from PyQt5.QtCore import QEvent
         if event.type() == QEvent.KeyPress:
@@ -1301,20 +1637,11 @@ class MainWindow(QMainWindow):
                     entry = current_item.data(Qt.UserRole)
                     self._paste_entry(entry, as_plain_text=(event.modifiers() == Qt.ShiftModifier))
                 return True
-            elif key == Qt.Key_K and event.modifiers() == Qt.ControlModifier:
-                current_item = self.list_widget.currentItem()
-                if current_item:
-                    rect = self.list_widget.visualItemRect(current_item)
-                    pos = rect.center()
-                    self._on_context_menu(pos)
-                return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.hide()
-        elif event.key() == Qt.Key_G and event.modifiers() == Qt.ControlModifier:
-            self.toggle_mode()
         else:
             super().keyPressEvent(event)
 
@@ -1325,6 +1652,22 @@ class MainWindow(QMainWindow):
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton and hasattr(self, "_drag_pos"):
             self.move(event.globalPos() - self._drag_pos)
+
+
+class HotkeySignalReceiver(QObject):
+    """把热键工作线程的回调安全地切换到 Qt 主线程执行。"""
+    def __init__(self, on_triggered, on_failed, parent=None):
+        super().__init__(parent)
+        self._on_triggered_callback = on_triggered
+        self._on_failed_callback = on_failed
+
+    @pyqtSlot()
+    def handle_triggered(self):
+        self._on_triggered_callback()
+
+    @pyqtSlot(str)
+    def handle_register_failed(self, hotkey):
+        self._on_failed_callback(hotkey)
 
 
 # ─────────────────────────── 应用主类 ───────────────────────────
@@ -1343,15 +1686,40 @@ class ClipboardManagerApp:
         self.permanent = PermanentStore()
         self.window = MainWindow(self.history, self.permanent, self.config)
 
+        # 接线：设置变更 → 立即生效
+        self.window._on_poll_changed = self._apply_poll_ms
+        self.window._on_global_hotkey_changed = self._apply_global_hotkey
+
         self._setup_tray()
 
         self.monitor = ClipboardChecker(poll_ms=self.config.get("poll_ms", 800))
         self.monitor.new_entry.connect(self._on_new_clip)
         self.monitor.start()
 
-        self.hotkey_mgr = GlobalHotkeyManager()
-        self.hotkey_mgr.signal_alt_v.connect(self._toggle_window)
+        self.hotkey_mgr = GlobalHotkeyManager(self.config.get("hotkey_global", "alt+v"))
+        self._hotkey_receiver = HotkeySignalReceiver(
+            self._toggle_window, self._on_hotkey_failed, self.app
+        )
+        self.hotkey_mgr.signal_triggered.connect(self._hotkey_receiver.handle_triggered)
+        self.hotkey_mgr.signal_register_failed.connect(self._hotkey_receiver.handle_register_failed)
         self.hotkey_mgr.start_listening()
+
+    def _apply_poll_ms(self, ms: int):
+        try:
+            self.monitor.set_poll_ms(int(ms))
+        except Exception:
+            pass
+
+    def _apply_global_hotkey(self, hotkey_str: str):
+        self.hotkey_mgr.update_hotkey(hotkey_str or "")
+
+    def _on_hotkey_failed(self, s: str):
+        display = normalize_shortcut_text(s) or s or "(空)"
+        self.tray.showMessage(
+            "剪贴板管理器",
+            f"全局热键注册失败（可能被占用）：{display}",
+            QSystemTrayIcon.Warning, 3000
+        )
 
     def _setup_tray(self):
         pixmap = QPixmap(32, 32)
@@ -1367,14 +1735,14 @@ class ClipboardManagerApp:
         painter.end()
 
         self.tray = QSystemTrayIcon(QIcon(pixmap), self.app)
-        self.tray.setToolTip("剪贴板管理器\nAlt+V 打开")
+        self.tray.setToolTip("剪贴板管理器")
 
         menu = QMenu()
         menu.setStyleSheet("""
             QMenu { background: #1e1e38; color: #d0d0f0; border: 1px solid #3a3a6e; }
             QMenu::item:selected { background: #2d2d6e; }
         """)
-        show_action = QAction("📋 显示历史 (Alt+V)", menu)
+        show_action = QAction("📋 显示历史", menu)
         show_action.triggered.connect(self._toggle_window)
         menu.addAction(show_action)
         menu.addSeparator()
@@ -1436,7 +1804,6 @@ class ClipboardManagerApp:
     def _quit(self):
         self.monitor.stop()
         self.hotkey_mgr.stop()
-        # 退出时强制把未落盘的历史写下去
         try:
             self.history._flush_save()
         except Exception:
@@ -1447,7 +1814,7 @@ class ClipboardManagerApp:
     def run(self):
         self.tray.showMessage(
             "剪贴板管理器",
-            "已启动！按 Alt+V 打开历史面板",
+            "已启动！在设置里可自定义快捷键",
             QSystemTrayIcon.Information,
             3000
         )
