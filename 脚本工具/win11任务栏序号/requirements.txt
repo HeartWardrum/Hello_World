@@ -1,2 +1,0 @@
-﻿uiautomation>=2.0.18
-pywin32>=306
