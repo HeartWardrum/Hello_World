@@ -1,17 +1,183 @@
-各位领导好。接下来由我我介绍一下《预授信额度动态测算项目技术需求文档》。
+明白，入参变成三个：`companyId`、`reportPeriodType`（年报/半年报/最新）、`yearRange`（近一年/近三年/近五年）。规则要重新梳理：
 
-这份文档不是业务宣讲材料，而是一份可落地的技术规格。它规定了数据清洗、模型训练、线上打分的流程。主实现路径是路径 A，也就是用 Java 自己训练模型、自己预测额度。附录里还有路径 B，可以用 已有Python 产出可用的模型，再交给 Java 侧联调。
+- **companyId**：过滤该公司
+- **yearRange**：决定年份范围。近一年 = 只有今年；近三年 = 今年 + 前2年；近五年 = 今年 + 前4年
+- **reportPeriodType**：
+  - `最新`：每个分组取 `report_period` 最新的一条（不管是不是 12-31）
+  - `年报`：只取 `report_period` 以 `-12-31` 结尾的，每组取最新一条
+  - `半年报`：只取 `report_period` 以 `-06-30` 结尾的，每组取最新一条
 
-先说核心业务逻辑。系统对每一个客户做两件事，第一件事是前置模型，用 CART 决策树判断该户是否属于一千万及以上这一档；如果命中，前置建议额度固定为一千万。第二件事是额度模型，按四个可以重叠的客群分别建模，分别是一般客群、科技客群、外贸客群和制造业客群。每个客群一套 CatBoost 多分类模型，先预测额度区间，再换成具体金额，再做调额后处理。
+分组维度仍是 **年份 + 项目 + 关联公司名称**（按你之前的要求）。下面用 XML + 窗口函数写，`reportPeriodType` 和 `yearRange` 用 `<if>` 动态拼条件。为了让 SQL 可控，建议在 Java 层把 `yearRange` 换算成具体的 `startDate`/`endDate` 再传进去（避免 XML 里算年份），同时把 `reportPeriodType` 原样传入用 `<choose>` 判断。
 
-**合并规则**是这样的。如果前置没有命中，最终建议额度就等于额度模型给出的调额后额度。如果前置命中了，最终建议额度取前置建议额度和调额后额度两者之中的较大值。文档特别强调一点：前置命中的客户仍然要进入额度模型，不要在额度阶段提前剔除，合并时再比较高低。另外，一户可以同时属于多个客群，就要分别跑、分别合并；如果需要多客群汇总，对同一个统一社会信用代码再取各客群最终建议额度里的最大值。
+## 一、入参设计
 
-下面按文档结构说完整性。全文按实现顺序写，主要有六块，外加附录。第一章是总览，讲清两模型、四客群和合并口径。第二章是数据准备，讲从原始数据到训练宽表和打分宽表，包括清洗、长转宽、衍生财务比率、手工分箱、业务标签，以及入模开关和打分开关。第三章是训练规格，写死前置 CART、各客群 CatBoost、特征工程口径，以及产物目录约定。第四章是预测全过程，按顺序是读表筛选、前置预测、按客群做额度预测、调额后处理，再合并最终建议额度。第五章是联调验收清单，列出金额单位、列映射、产物成对使用、命中户仍进额度等硬性检查项。第六章是结论，并在附录 A 说明路径 B 的 Python 操作步骤。
+```java
+public class ReportQueryDTO {
+    private Long companyId;            // 公司
+    private String reportPeriodType;   // LATEST / ANNUAL / SEMI_ANNUAL
+    private String yearRange;          // LAST_1 / LAST_3 / LAST_5
+}
+```
 
-从完整性看，输入规范、训练口径、推理流程、产物格式、验收清单和双路径说明都具备，能够支撑后续开发对照实现。从规范性看，关键约束写得很明确：金额统一为元，比率统一为小数；训练集用「是否进入模型」，打分集用「是否参与打分」，两个开关不能混用；训练阶段特征映射用二零二四年相关源列，打分阶段必须用二零二五年相关源列，增速类用二零二三到二零二五年，不能把训练年的列误接到打分上。这些写法有利于避免联调踩坑。
+建议枚举化：`reportPeriodType` 用 `LATEST`/`ANNUAL`/`SEMI_ANNUAL`，`yearRange` 用 `LAST_1`/`LAST_3`/`LAST_5`，Java 层换算日期：
 
-再说一下算法与后处理，方便大家判断技术可行性。前置侧大致是：先做特征工程，再做 Pipeline，数值列用中位数填补再做标准化，类别列用众数填补再做独热编码，然后送入 CART，用叶节点正类概率和阈值比较，达到阈值就命中并给出一千万。额度侧是把实际授信额度切成五个区间，边界是零、二百五十万、五百万、六百五十万、八百万、一千万，模型先出档位，再取该档代表金额。后处理按固定顺序连乘行业系数、高负债系数、增速分位系数、交叉比对系数，再乘全局调额系数，最后在档内做上下限钳制。产物方面，前置相关参数放在 gate 目录，各客群的 CatBoost 模型和预处理状态放在各自的 limit 目录；同一客群的模型和 JSON 必须来自同一次训练，禁止跨客群或跨批次混用。换客群或换期必须重训后再打分。
+```java
+int currentYear = LocalDate.now().getYear();
+int years = switch (yearRange) {
+    case "LAST_1" -> 1;
+    case "LAST_3" -> 3;
+    case "LAST_5" -> 5;
+    default -> 5;
+};
+int startYear = currentYear - (years - 1);
+String startDate = startYear + "-01-01";
+String endDate   = currentYear + "-12-31";
+```
 
-综合以上，这份技术需求文档结构完整、口径明确，能够指导开发和联调，满足交付要求里对技术文件完整性和规范性的审查，也能为后续内部开发提供参考依据。建议开发时优先对照第五章验收清单逐项核对，尤其注意三点：打分时不要误用训练开关；打分特征必须使用二零二五年源列；前置命中户仍然进入额度模型。
+## 二、Mapper 接口
 
-我的介绍就到这里，谢谢大家。
+```java
+List<Report> selectLatestPerGroup(@Param("companyId") Long companyId,
+                                  @Param("reportPeriodType") String reportPeriodType,
+                                  @Param("startDate") String startDate,
+                                  @Param("endDate") String endDate);
+```
+
+## 三、XML（MySQL 8+，窗口函数）
+
+```xml
+<select id="selectLatestPerGroup" resultType="com.xxx.entity.Report">
+    SELECT *
+    FROM (
+        SELECT r.*,
+               YEAR(r.report_period) AS report_year,
+               ROW_NUMBER() OVER (
+                   PARTITION BY YEAR(r.report_period), r.project_id, r.related_company_name
+                   ORDER BY r.report_period DESC
+               ) AS rn
+        FROM report r
+        WHERE r.company_id = #{companyId}
+          AND r.report_period BETWEEN #{startDate} AND #{endDate}
+        <choose>
+            <!-- 年报：只要 12-31 -->
+            <when test="reportPeriodType == 'ANNUAL'">
+                AND r.report_period LIKE '%-12-31'
+            </when>
+            <!-- 半年报：只要 06-30 -->
+            <when test="reportPeriodType == 'SEMI_ANNUAL'">
+                AND r.report_period LIKE '%-06-30'
+            </when>
+            <!-- 最新：不过滤报告期后缀，每组取最新即可 -->
+        </choose>
+    ) t
+    WHERE t.rn = 1
+    ORDER BY t.report_period DESC
+</select>
+```
+
+说明：
+- `<choose>` 在**内层 WHERE** 就把报告期类型过滤掉，这样 `ROW_NUMBER` 是在"符合条件的报告"里取每组最新。对年报/半年报来说，每组本来就只剩 12-31/06-30 的行，`rn=1` 取最新那条即可（防止一年有多个 12-31 修订版）。
+- `最新` 类型不筛后缀，每组取 `report_period` 最大的一条。
+- 年份范围由外层 `BETWEEN #{startDate} AND #{endDate}` 控制，`近一年` 传 `今年-01-01 ~ 今年-12-31`，`近三年`/`近五年` 同理。
+- `companyId` 过滤放在最内层，减少参与窗口计算的行数。
+
+### 如果"最新"的语义是"今年取最新、往年取年报"
+
+你最早的需求是"今年取最新、前几年取 -12-31"。如果 `最新` 类型要保留这个混合语义，那 `<choose>` 里 `最新` 分支不能简单不过滤，而是：
+
+```xml
+<when test="reportPeriodType == 'LATEST'">
+    AND (
+        YEAR(r.report_period) = YEAR(#{endDate})          <!-- 今年全量 -->
+        OR r.report_period LIKE '%-12-31'                 <!-- 往年只要年报 -->
+    )
+</when>
+```
+
+但注意：这样内层就先把往年非 12-31 的行排掉了，`ROW_NUMBER` 是在"今年全部 + 往年 12-31"里取每组最新——语义是"**往年优先取 12-31 那条**"，而不是"取最新再看是不是 12-31"。两者在"某年最新是季报、更早有年报"时结果不同。**按业务确认你要哪种**：
+- 要"取最新，不是年报就拉倒" → 内层不过滤，外层筛；
+- 要"往年有年报就取年报" → 内层按上面 `<when>` 过滤。
+
+我建议**默认按"取最新再看类型"**（更符合字面"最新"），即内层只按类型筛后缀，`最新` 分支不过滤，外层 `rn=1`。若业务要混合语义，再按上面改。
+
+## 四、XML（MySQL 5.7 兼容，无窗口函数）
+
+5.7 没有 `ROW_NUMBER`，用自连接。但因为多了报告期类型过滤，子查询里也要带上同样的条件：
+
+```xml
+<select id="selectLatestPerGroup" resultType="com.xxx.entity.Report">
+    SELECT r.*
+    FROM report r
+    INNER JOIN (
+        SELECT YEAR(report_period)        AS y,
+               project_id,
+               related_company_name,
+               MAX(report_period)         AS max_period
+        FROM report
+        WHERE company_id = #{companyId}
+          AND report_period BETWEEN #{startDate} AND #{endDate}
+        <choose>
+            <when test="reportPeriodType == 'ANNUAL'">
+                AND report_period LIKE '%-12-31'
+            </when>
+            <when test="reportPeriodType == 'SEMI_ANNUAL'">
+                AND report_period LIKE '%-06-30'
+            </when>
+        </choose>
+        GROUP BY YEAR(report_period), project_id, related_company_name
+    ) m
+      ON YEAR(r.report_period) = m.y
+     AND r.project_id = m.project_id
+     AND r.related_company_name = m.related_company_name
+     AND r.report_period = m.max_period
+    WHERE r.company_id = #{companyId}
+      AND r.report_period BETWEEN #{startDate} AND #{endDate}
+    ORDER BY r.report_period DESC
+</select>
+```
+
+5.7 版同样有"同组同 `max_period` 多行会重复"的坑，数据无重复则没问题。
+
+## 五、Java 调用
+
+```java
+int currentYear = LocalDate.now().getYear();
+int years = switch (yearRange) {
+    case "LAST_1" -> 1;
+    case "LAST_3" -> 3;
+    case "LAST_5" -> 5;
+    default -> 5;
+};
+String startDate = (currentYear - (years - 1)) + "-01-01";
+String endDate   = currentYear + "-12-31";
+
+List<Report> result = reportMapper.selectLatestPerGroup(
+        companyId, reportPeriodType, startDate, endDate);
+```
+
+## 六、几个要点
+
+1. **`report_period` 是 date 类型**：`LIKE '%-12-31'` 不能用，改成 `MONTH(report_period)=12 AND DAY(report_period)=31`（半年报 `MONTH=6 AND DAY=30`）。date 版 `<choose>`：
+   ```xml
+   <when test="reportPeriodType == 'ANNUAL'">
+       AND MONTH(r.report_period) = 12 AND DAY(r.report_period) = 31
+   </when>
+   <when test="reportPeriodType == 'SEMI_ANNUAL'">
+       AND MONTH(r.report_period) = 6 AND DAY(r.report_period) = 30
+   </when>
+   ```
+
+2. **`yearRange` 到底含不含今年**："近一年"我理解为只有今年（`今年-01-01 ~ 今年-12-31`）。如果业务"近一年"指"最近 12 个月"（滚动窗口，如 2023-10-22 ~ 2024-10-22），那 `startDate` 要改成 `LocalDate.now().minusYears(1)`，且"今年"判断也不能用 `YEAR(endDate)`，需单独传 `currentYear`。**确认一下"近 N 年"是自然年还是滚动年**，这会影响 SQL 和是否保留 `YEAR = 今年` 的混合逻辑。
+
+3. **`reportPeriodType` 命名**：XML 里 `<when test="reportPeriodType == 'ANNUAL'">` 是字符串比较，OGNL 里用 `==` 或 `.equals()` 都行，注意单引号是 char 还是 String——MyBatis OGNL 里 `'ANNUAL'` 是 String，`"ANNUAL"` 也行；但**不要写成 `'A'` 单字符**避免 char 比较坑。
+
+4. **排序**：结果 `ORDER BY report_period DESC`，最新在前。若还想按项目/公司排序，追加 `, project_id, related_company_name`。
+
+5. **`最新` 类型的最终语义**：上面给的 `最新` 分支是"不过滤后缀，每组取最新"。如果你要"今年取最新、往年取年报"，按第三节末尾的 `<when test="reportPeriodType == 'LATEST'">` 改，并想清楚"往年优先年报" vs "取最新再看是否年报"的区别。
+
+## 总结
+
+- 入参三件套：`companyId` 过滤公司，`yearRange` 在 Java 层换算成 `startDate/endDate` 传 SQL，`reportPeriodType` 在 XML 里用 `<choose>` 控制报告期后缀过滤（年报 12-31、半年报 06-30、最新不过滤）。
+- 分组取最新用窗口函数 `ROW_NUMBER() OVER (PARTITION BY 年份,项目,公司 ORDER BY report_period DESC)`，外层 `rn=1`。
+- 5.7 用 `GROUP BY + MAX(report_period)` 自连接。
+- 注意 date 类型不能用 `LIKE` 后缀、`yearRange` 是自然年还是滚动年、以及"最新"是否需要"今年最新+往年年报"的混合语义——这三点按业务确认后微调即可。
