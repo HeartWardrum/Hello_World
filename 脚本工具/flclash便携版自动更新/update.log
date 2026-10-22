@@ -4,3 +4,9 @@
 [2026-10-15 15:02:19] Check started
 [2026-10-15 15:02:19] Bootstrap mode
 [2026-10-15 15:02:19] Bootstrap: existing v0.9.0
+[2026-10-19 10:00:02] Check started
+[2026-10-19 10:00:02] Local 0.9.0 @ D:\tool\FlClash-0.9.0-windows-amd64
+[2026-10-19 10:00:03] Remote 0.9.1
+[2026-10-19 10:00:21] Downloading https://github.com/chen08209/FlClash/releases/download/v0.9.1/FlClash-0.9.1-windows-amd64.zip
+[2026-10-19 10:00:21] Try URL https://github.com/chen08209/FlClash/releases/download/v0.9.1/FlClash-0.9.1-windows-amd64.zip
+[2026-10-19 10:03:00] Installed 0.9.1 @ D:\tool\FlClash-0.9.1-windows-amd64
