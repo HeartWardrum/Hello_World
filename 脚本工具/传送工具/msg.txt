@@ -1,51 +1,3 @@
-明白，入参变成三个：`companyId`、`reportPeriodType`（年报/半年报/最新）、`yearRange`（近一年/近三年/近五年）。规则要重新梳理：
-
-- **companyId**：过滤该公司
-- **yearRange**：决定年份范围。近一年 = 只有今年；近三年 = 今年 + 前2年；近五年 = 今年 + 前4年
-- **reportPeriodType**：
-  - `最新`：每个分组取 `report_period` 最新的一条（不管是不是 12-31）
-  - `年报`：只取 `report_period` 以 `-12-31` 结尾的，每组取最新一条
-  - `半年报`：只取 `report_period` 以 `-06-30` 结尾的，每组取最新一条
-
-分组维度仍是 **年份 + 项目 + 关联公司名称**（按你之前的要求）。下面用 XML + 窗口函数写，`reportPeriodType` 和 `yearRange` 用 `<if>` 动态拼条件。为了让 SQL 可控，建议在 Java 层把 `yearRange` 换算成具体的 `startDate`/`endDate` 再传进去（避免 XML 里算年份），同时把 `reportPeriodType` 原样传入用 `<choose>` 判断。
-
-## 一、入参设计
-
-```java
-public class ReportQueryDTO {
-    private Long companyId;            // 公司
-    private String reportPeriodType;   // LATEST / ANNUAL / SEMI_ANNUAL
-    private String yearRange;          // LAST_1 / LAST_3 / LAST_5
-}
-```
-
-建议枚举化：`reportPeriodType` 用 `LATEST`/`ANNUAL`/`SEMI_ANNUAL`，`yearRange` 用 `LAST_1`/`LAST_3`/`LAST_5`，Java 层换算日期：
-
-```java
-int currentYear = LocalDate.now().getYear();
-int years = switch (yearRange) {
-    case "LAST_1" -> 1;
-    case "LAST_3" -> 3;
-    case "LAST_5" -> 5;
-    default -> 5;
-};
-int startYear = currentYear - (years - 1);
-String startDate = startYear + "-01-01";
-String endDate   = currentYear + "-12-31";
-```
-
-## 二、Mapper 接口
-
-```java
-List<Report> selectLatestPerGroup(@Param("companyId") Long companyId,
-                                  @Param("reportPeriodType") String reportPeriodType,
-                                  @Param("startDate") String startDate,
-                                  @Param("endDate") String endDate);
-```
-
-## 三、XML（MySQL 8+，窗口函数）
-
-```xml
 <select id="selectLatestPerGroup" resultType="com.xxx.entity.Report">
     SELECT *
     FROM (
@@ -58,126 +10,18 @@ List<Report> selectLatestPerGroup(@Param("companyId") Long companyId,
         FROM report r
         WHERE r.company_id = #{companyId}
           AND r.report_period BETWEEN #{startDate} AND #{endDate}
-        <choose>
-            <!-- 年报：只要 12-31 -->
-            <when test="reportPeriodType == 'ANNUAL'">
-                AND r.report_period LIKE '%-12-31'
-            </when>
-            <!-- 半年报：只要 06-30 -->
-            <when test="reportPeriodType == 'SEMI_ANNUAL'">
-                AND r.report_period LIKE '%-06-30'
-            </when>
-            <!-- 最新：不过滤报告期后缀，每组取最新即可 -->
-        </choose>
+        <!-- 年报/半年报：内层先按类型筛，再取组内最新（语义 B） -->
+        <if test="reportPeriodType == 'ANNUAL'">
+            AND r.report_period LIKE '%-12-31'
+        </if>
+        <if test="reportPeriodType == 'SEMI_ANNUAL'">
+            AND r.report_period LIKE '%-06-30'
+        </if>
     ) t
     WHERE t.rn = 1
+    <!-- 最新：外层判今年/往年年报（语义 A） -->
+    <if test="reportPeriodType == 'LATEST'">
+        AND (t.report_year = YEAR(#{endDate}) OR t.report_period LIKE '%-12-31')
+    </if>
     ORDER BY t.report_period DESC
 </select>
-```
-
-说明：
-- `<choose>` 在**内层 WHERE** 就把报告期类型过滤掉，这样 `ROW_NUMBER` 是在"符合条件的报告"里取每组最新。对年报/半年报来说，每组本来就只剩 12-31/06-30 的行，`rn=1` 取最新那条即可（防止一年有多个 12-31 修订版）。
-- `最新` 类型不筛后缀，每组取 `report_period` 最大的一条。
-- 年份范围由外层 `BETWEEN #{startDate} AND #{endDate}` 控制，`近一年` 传 `今年-01-01 ~ 今年-12-31`，`近三年`/`近五年` 同理。
-- `companyId` 过滤放在最内层，减少参与窗口计算的行数。
-
-### 如果"最新"的语义是"今年取最新、往年取年报"
-
-你最早的需求是"今年取最新、前几年取 -12-31"。如果 `最新` 类型要保留这个混合语义，那 `<choose>` 里 `最新` 分支不能简单不过滤，而是：
-
-```xml
-<when test="reportPeriodType == 'LATEST'">
-    AND (
-        YEAR(r.report_period) = YEAR(#{endDate})          <!-- 今年全量 -->
-        OR r.report_period LIKE '%-12-31'                 <!-- 往年只要年报 -->
-    )
-</when>
-```
-
-但注意：这样内层就先把往年非 12-31 的行排掉了，`ROW_NUMBER` 是在"今年全部 + 往年 12-31"里取每组最新——语义是"**往年优先取 12-31 那条**"，而不是"取最新再看是不是 12-31"。两者在"某年最新是季报、更早有年报"时结果不同。**按业务确认你要哪种**：
-- 要"取最新，不是年报就拉倒" → 内层不过滤，外层筛；
-- 要"往年有年报就取年报" → 内层按上面 `<when>` 过滤。
-
-我建议**默认按"取最新再看类型"**（更符合字面"最新"），即内层只按类型筛后缀，`最新` 分支不过滤，外层 `rn=1`。若业务要混合语义，再按上面改。
-
-## 四、XML（MySQL 5.7 兼容，无窗口函数）
-
-5.7 没有 `ROW_NUMBER`，用自连接。但因为多了报告期类型过滤，子查询里也要带上同样的条件：
-
-```xml
-<select id="selectLatestPerGroup" resultType="com.xxx.entity.Report">
-    SELECT r.*
-    FROM report r
-    INNER JOIN (
-        SELECT YEAR(report_period)        AS y,
-               project_id,
-               related_company_name,
-               MAX(report_period)         AS max_period
-        FROM report
-        WHERE company_id = #{companyId}
-          AND report_period BETWEEN #{startDate} AND #{endDate}
-        <choose>
-            <when test="reportPeriodType == 'ANNUAL'">
-                AND report_period LIKE '%-12-31'
-            </when>
-            <when test="reportPeriodType == 'SEMI_ANNUAL'">
-                AND report_period LIKE '%-06-30'
-            </when>
-        </choose>
-        GROUP BY YEAR(report_period), project_id, related_company_name
-    ) m
-      ON YEAR(r.report_period) = m.y
-     AND r.project_id = m.project_id
-     AND r.related_company_name = m.related_company_name
-     AND r.report_period = m.max_period
-    WHERE r.company_id = #{companyId}
-      AND r.report_period BETWEEN #{startDate} AND #{endDate}
-    ORDER BY r.report_period DESC
-</select>
-```
-
-5.7 版同样有"同组同 `max_period` 多行会重复"的坑，数据无重复则没问题。
-
-## 五、Java 调用
-
-```java
-int currentYear = LocalDate.now().getYear();
-int years = switch (yearRange) {
-    case "LAST_1" -> 1;
-    case "LAST_3" -> 3;
-    case "LAST_5" -> 5;
-    default -> 5;
-};
-String startDate = (currentYear - (years - 1)) + "-01-01";
-String endDate   = currentYear + "-12-31";
-
-List<Report> result = reportMapper.selectLatestPerGroup(
-        companyId, reportPeriodType, startDate, endDate);
-```
-
-## 六、几个要点
-
-1. **`report_period` 是 date 类型**：`LIKE '%-12-31'` 不能用，改成 `MONTH(report_period)=12 AND DAY(report_period)=31`（半年报 `MONTH=6 AND DAY=30`）。date 版 `<choose>`：
-   ```xml
-   <when test="reportPeriodType == 'ANNUAL'">
-       AND MONTH(r.report_period) = 12 AND DAY(r.report_period) = 31
-   </when>
-   <when test="reportPeriodType == 'SEMI_ANNUAL'">
-       AND MONTH(r.report_period) = 6 AND DAY(r.report_period) = 30
-   </when>
-   ```
-
-2. **`yearRange` 到底含不含今年**："近一年"我理解为只有今年（`今年-01-01 ~ 今年-12-31`）。如果业务"近一年"指"最近 12 个月"（滚动窗口，如 2023-10-22 ~ 2024-10-22），那 `startDate` 要改成 `LocalDate.now().minusYears(1)`，且"今年"判断也不能用 `YEAR(endDate)`，需单独传 `currentYear`。**确认一下"近 N 年"是自然年还是滚动年**，这会影响 SQL 和是否保留 `YEAR = 今年` 的混合逻辑。
-
-3. **`reportPeriodType` 命名**：XML 里 `<when test="reportPeriodType == 'ANNUAL'">` 是字符串比较，OGNL 里用 `==` 或 `.equals()` 都行，注意单引号是 char 还是 String——MyBatis OGNL 里 `'ANNUAL'` 是 String，`"ANNUAL"` 也行；但**不要写成 `'A'` 单字符**避免 char 比较坑。
-
-4. **排序**：结果 `ORDER BY report_period DESC`，最新在前。若还想按项目/公司排序，追加 `, project_id, related_company_name`。
-
-5. **`最新` 类型的最终语义**：上面给的 `最新` 分支是"不过滤后缀，每组取最新"。如果你要"今年取最新、往年取年报"，按第三节末尾的 `<when test="reportPeriodType == 'LATEST'">` 改，并想清楚"往年优先年报" vs "取最新再看是否年报"的区别。
-
-## 总结
-
-- 入参三件套：`companyId` 过滤公司，`yearRange` 在 Java 层换算成 `startDate/endDate` 传 SQL，`reportPeriodType` 在 XML 里用 `<choose>` 控制报告期后缀过滤（年报 12-31、半年报 06-30、最新不过滤）。
-- 分组取最新用窗口函数 `ROW_NUMBER() OVER (PARTITION BY 年份,项目,公司 ORDER BY report_period DESC)`，外层 `rn=1`。
-- 5.7 用 `GROUP BY + MAX(report_period)` 自连接。
-- 注意 date 类型不能用 `LIKE` 后缀、`yearRange` 是自然年还是滚动年、以及"最新"是否需要"今年最新+往年年报"的混合语义——这三点按业务确认后微调即可。
