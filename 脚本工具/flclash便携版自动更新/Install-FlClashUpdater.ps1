@@ -71,7 +71,7 @@ function Register-FlClashTask {
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
     -MultipleInstances IgnoreNew
   $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-  $desc = 'Weekly FlClash portable update check. Prompts before update; never force-kills FlClash.'
+  $desc = 'Weekly FlClash portable update check. One confirm then auto stop/install/remove old/start.'
 
   Register-ScheduledTask `
     -TaskName $TaskName `
@@ -105,7 +105,10 @@ function Ensure-DesktopShortcuts {
   param([string]$ToolRoot)
   $desktop = [Environment]::GetFolderPath('Desktop')
   $exe = Join-Path $ToolRoot 'FlClash\FlClash.exe'
-  $checkBat = Join-Path $UpdaterDir '检查更新.bat'
+  $checkBat = Join-Path $UpdaterDir '手动更新.bat'
+  if (-not (Test-Path $checkBat)) {
+    $checkBat = Join-Path $UpdaterDir '检查更新.bat'
+  }
 
   if (Test-Path $exe) {
     New-Shortcut `
@@ -116,10 +119,10 @@ function Ensure-DesktopShortcuts {
   }
   if (Test-Path $checkBat) {
     New-Shortcut `
-      -LinkPath (Join-Path $desktop 'FlClash 检查更新.lnk') `
+      -LinkPath (Join-Path $desktop 'FlClash 手动更新.lnk') `
       -TargetPath $checkBat `
       -WorkingDirectory $UpdaterDir `
-      -Description '手动检查 FlClash 更新'
+      -Description '手动更新 FlClash（一次确认后自动完成）'
   }
 }
 
@@ -181,8 +184,9 @@ FlClash 版本：v$ver
 
 桌面已创建：
   · FlClash
-  · FlClash 检查更新
+  · FlClash 手动更新
 
+手动验收可运行本目录「手动更新.bat」。
 如需移除自动更新，运行本目录下的「卸载.bat」。
 "@
   exit 0
