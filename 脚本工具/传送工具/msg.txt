@@ -1,27 +1,86 @@
-<select id="selectLatestPerGroup" resultType="com.xxx.entity.Report">
-    SELECT *
-    FROM (
-        SELECT r.*,
-               YEAR(r.report_period) AS report_year,
-               ROW_NUMBER() OVER (
-                   PARTITION BY YEAR(r.report_period), r.project_id, r.related_company_name
-                   ORDER BY r.report_period DESC
-               ) AS rn
-        FROM report r
-        WHERE r.company_id = #{companyId}
-          AND r.report_period BETWEEN #{startDate} AND #{endDate}
-        <!-- 年报/半年报：内层先按类型筛，再取组内最新（语义 B） -->
-        <if test="reportPeriodType == 'ANNUAL'">
-            AND r.report_period LIKE '%-12-31'
-        </if>
-        <if test="reportPeriodType == 'SEMI_ANNUAL'">
-            AND r.report_period LIKE '%-06-30'
-        </if>
-    ) t
-    WHERE t.rn = 1
-    <!-- 最新：外层判今年/往年年报（语义 A） -->
-    <if test="reportPeriodType == 'LATEST'">
-        AND (t.report_year = YEAR(#{endDate}) OR t.report_period LIKE '%-12-31')
+<select id="queryList" resultMap="BaseResultMap">
+    SELECT
+        id,
+        company_id,
+        report_period,
+        report_date,
+        related_party_name,
+        related_party_relation,
+        project_one,
+        project_two,
+        project_three,
+        amount,
+        proportion,
+        delete_identify
+    FROM faf_related_party frp
+    WHERE frp.delete_identify = 0
+      AND company_id = #{companyId}
+      AND report_period &gt;= CAST(CONCAT(#{startYear}, '11') AS INT)
+      AND report_period &lt;= CAST(CONCAT(#{endYear}, '41') AS INT)
+      
+    <choose>
+        <!-- 1. 选择“年报” -->
+        <when test="reportType == '年报'">
+            <!-- 假设年报是以 12 结尾，如果是 41 结尾请改成 '%41' -->
+            AND CAST(report_period AS VARCHAR) LIKE '%12'
+        </when>
+
+        <!-- 2. 选择“半年报” -->
+        <when test="reportType == '半年报'">
+            <!-- 假设半年报是以 06 结尾（或者 30），请根据实际数据库数据修改 -->
+            AND CAST(report_period AS VARCHAR) LIKE '%06'
+        </when>
+
+        <!-- 3. 选择“最新” -->
+        <when test="reportType == '最新'">
+            <!-- 这里不能直接过滤，需要用到子查询+开窗函数 -->
+            AND frp.id IN (
+                SELECT id FROM (
+                    SELECT 
+                        id,
+                        report_period,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY company_id 
+                            -- 按报告期降序排，保证最新的一期排在第一位
+                            ORDER BY report_period DESC
+                        ) as rn
+                    FROM faf_related_party 
+                    WHERE delete_identify = 0 
+                      AND company_id = #{companyId}
+                      -- 范围条件必须带上，防止全表扫描
+                      AND report_period &gt;= CAST(CONCAT(#{startYear}, '11') AS INT)
+                      AND report_period &lt;= CAST(CONCAT(#{endYear}, '41') AS INT)
+                      AND (
+                          -- 今年：取最新（这里用 GETDATE() 取数据库当前年份）
+                          LEFT(CAST(report_period AS VARCHAR), 4) = CAST(YEAR(GETDATE()) AS VARCHAR)
+                          OR
+                          -- 历年：取年报（根据你的数据类型，这里假设年报是 12 结尾）
+                          CAST(report_period AS VARCHAR) LIKE '%12' 
+                          -- 注意：如果你原代码里的 '41' 代表年报，这里就改成 '%41'
+                      )
+                ) t
+                WHERE 
+                    -- 今年（或者最新的年份）数据中，只取 rn = 1 的那一条
+                    (LEFT(CAST(report_period AS VARCHAR), 4) = CAST(YEAR(GETDATE()) AS VARCHAR) AND rn = 1)
+                    OR
+                    -- 历年年报数据，不管 rn 是多少都保留
+                    LEFT(CAST(report_period AS VARCHAR), 4) &lt; CAST(YEAR(GETDATE()) AS VARCHAR)
+            )
+        </when>
+    </choose>
+
+    <!-- 下面是原有的动态条件，直接保留即可 -->
+    <if test="relatedPartyNameList != null and relatedPartyNameList.size() > 0">
+        AND related_party_name IN
+        <foreach collection="relatedPartyNameList" item="name" open="(" separator="," close=")">
+            #{name}
+        </foreach>
     </if>
-    ORDER BY t.report_period DESC
+
+    <if test="relatedPartyRelationList != null and relatedPartyRelationList.size() > 0">
+        AND related_party_relation IN
+        <foreach collection="relatedPartyRelationList" item="name" open="(" separator="," close=")">
+            #{name}
+        </foreach>
+    </if>
 </select>
