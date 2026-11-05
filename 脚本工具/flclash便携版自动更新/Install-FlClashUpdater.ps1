@@ -56,31 +56,79 @@ function Save-Config {
   ) | Set-Content -Path $ConfigPath -Encoding UTF8
 }
 
+function Test-IsElevated {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object Security.Principal.WindowsPrincipal($id)
+  return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Register-FlClashTask {
   $ps1 = Join-Path $UpdaterDir 'Update-FlClash.ps1'
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`" -SilentCheck"
 
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  $registerInline = {
+    param([string]$Name, [string]$Argument, [string]$User)
+    Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue
+    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $Argument
+    $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At '10:00'
+    $settings = New-ScheduledTaskSettingsSet `
+      -AllowStartIfOnBatteries `
+      -DontStopIfGoingOnBatteries `
+      -StartWhenAvailable `
+      -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
+      -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+    $desc = 'Weekly FlClash portable update check. One confirm then auto stop/install/remove old/start.'
+    Register-ScheduledTask `
+      -TaskName $Name `
+      -Action $action `
+      -Trigger $trigger `
+      -Settings $settings `
+      -Principal $principal `
+      -Description $desc `
+      -Force | Out-Null
+  }
 
-  $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
-  $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At '10:00'
-  $settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
-    -MultipleInstances IgnoreNew
-  $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-  $desc = 'Weekly FlClash portable update check. One confirm then auto stop/install/remove old/start.'
+  try {
+    & $registerInline -Name $TaskName -Argument $arg -User $env:USERNAME
+    return
+  } catch {
+    if (Test-IsElevated) { throw }
+  }
 
-  Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description $desc `
-    -Force | Out-Null
+  # Many machines deny Register-ScheduledTask without elevation.
+  $tmp = Join-Path $env:TEMP ("FlClash-reg-task-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+  $marker = Join-Path $env:TEMP ("FlClash-reg-task-{0}.ok" -f [guid]::NewGuid().ToString('N'))
+  $safeArg = $arg.Replace("'", "''")
+  $safeUser = $env:USERNAME.Replace("'", "''")
+  $safeName = $TaskName.Replace("'", "''")
+  @"
+`$ErrorActionPreference = 'Stop'
+Unregister-ScheduledTask -TaskName '$safeName' -Confirm:`$false -ErrorAction SilentlyContinue
+`$action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '$safeArg'
+`$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At '10:00'
+`$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+`$principal = New-ScheduledTaskPrincipal -UserId '$safeUser' -LogonType Interactive -RunLevel Limited
+`$desc = 'Weekly FlClash portable update check. One confirm then auto stop/install/remove old/start.'
+Register-ScheduledTask -TaskName '$safeName' -Action `$action -Trigger `$trigger -Settings `$settings -Principal `$principal -Description `$desc -Force | Out-Null
+'OK' | Set-Content -Path '$($marker.Replace("'","''"))' -Encoding UTF8
+"@ | Set-Content -Path $tmp -Encoding UTF8
+
+  try {
+    $p = Start-Process -FilePath 'powershell.exe' `
+      -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp) `
+      -Verb RunAs -Wait -PassThru
+  } catch {
+    throw '需要管理员权限才能注册计划任务。请在 UAC 提示时选择「是」。'
+  } finally {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  }
+
+  $ok = Test-Path $marker
+  Remove-Item $marker -Force -ErrorAction SilentlyContinue
+  if ($null -eq $p -or $p.ExitCode -ne 0 -or -not $ok) {
+    throw '注册计划任务失败（可能取消了 UAC，或权限不足）。'
+  }
 }
 
 function New-Shortcut {
