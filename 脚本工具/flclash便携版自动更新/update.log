@@ -50,3 +50,24 @@
 [2026-11-05 19:54:49] Check started
 [2026-11-05 19:54:49] Bootstrap mode
 [2026-11-05 19:54:49] Bootstrap: existing v0.9.2
+[2026-11-07 09:27:57] Check started
+[2026-11-07 09:27:57] Local 0.9.2 @ D:\tool\FlClash-0.9.2-windows-amd64
+[2026-11-07 09:27:58] Remote 0.9.3
+[2026-11-07 11:35:53] Stopping FlClash: FlClash, FlClashCore
+[2026-11-07 11:35:59] FlClash stopped
+[2026-11-07 11:35:59] Removed old install D:\tool\FlClash-0.9.2-windows-amd64
+[2026-11-07 11:36:01] Starting D:\tool\FlClash-0.9.3-windows-amd64\FlClash.exe
+[2026-11-07 11:36:04] FlClash window activated
+[2026-11-07 11:36:04] Started OK pid=27104 path=D:\tool\FlClash-0.9.3-windows-amd64\FlClash.exe
+[2026-11-07 15:13:29] Check started
+[2026-11-07 15:13:29] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-07 15:13:29] Remote 0.9.3
+[2026-11-07 15:13:29] Already up to date
+[2026-11-09 19:24:33] Check started
+[2026-11-09 19:24:33] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-09 19:24:34] Remote 0.9.3
+[2026-11-09 19:24:34] Already up to date
+[2026-11-13 18:33:52] Check started
+[2026-11-13 18:33:52] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-13 18:33:56] Remote 0.9.3
+[2026-11-13 18:33:56] Already up to date
