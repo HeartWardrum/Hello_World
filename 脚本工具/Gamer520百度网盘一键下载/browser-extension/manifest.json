@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Gamer520 → 百度网盘",
+  "version": "1.1.0",
+  "description": "在 gamer520 文章页一键提取百度网盘链接并唤起本地客户端（绕过网页验证码）",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4MydwDwlzQaggi9GvJYus7vQB96YBsSaKuWJVfdCG49jabJD+aLQa9MsM7IHU5JUhKrqd/+PAZrYbbFI49sVZuLl3EKcG2GDSIcvK7m/Y5N6lEfnDcsoS8R8Yo7UFLaMQNu1OK7rCk717IqNR5pw+eU7nrkRwPEoLEawNMgf+DnlfVEzReknOpfg3FzmJsrfQCzuD2c5eDdYeAWHvdez9mytirTvqXh/mSsFjezELxFLw62O2mSZOIR/jxpIPSclV8qt2F4bJGT6wzxoZGDst3OoeEjkdk1KWqRbBzyTQIcnhVwGmGm0zJvYZ5tX4AyZEC+b8kb1s7dKJYTb9exgHQIDAQAB",
+  "permissions": ["activeTab", "notifications", "nativeMessaging"],
+  "host_permissions": [
+    "*://www.gamer520.com/*",
+    "*://gamer520.com/*",
+    "*://520.gamers520.com/*",
+    "*://*.gamers520.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "一键提取并打开百度网盘",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
