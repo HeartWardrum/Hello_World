@@ -49,6 +49,7 @@ function Write-Log {
 
 function Show-Info {
   param([string]$Text, [string]$Title = 'FlClash 更新')
+  Close-ProgressUI
   [System.Windows.Forms.MessageBox]::Show(
     $Text, $Title,
     [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -64,6 +65,156 @@ function Show-YesNo {
     [System.Windows.Forms.MessageBoxIcon]::Question,
     [System.Windows.Forms.MessageBoxDefaultButton]::Button1
   )
+}
+
+# --- progress window (download / extract feedback) ---
+$script:ProgressUI       = $null
+$script:ProgressEnabled  = $false
+$script:ProgressLastTick = [datetime]::MinValue
+
+function Format-Size {
+  param([double]$Bytes)
+  if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+  if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+  if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+  return ('{0:N0} B' -f $Bytes)
+}
+
+function Format-Eta {
+  param([double]$Seconds)
+  if ($Seconds -lt 1) { return '1 秒' }
+  if ($Seconds -ge 3600) { return ('{0:N1} 小时' -f ($Seconds / 3600)) }
+  if ($Seconds -ge 60) { return ('{0:N0} 分 {1:N0} 秒' -f [math]::Floor($Seconds / 60), [math]::Floor($Seconds % 60)) }
+  return ('{0:N0} 秒' -f $Seconds)
+}
+
+function Get-ProgressUI {
+  if ($script:ProgressUI) { return $script:ProgressUI }
+
+  $font      = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
+  $smallFont = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text            = 'FlClash 更新'
+  $form.ClientSize      = New-Object System.Drawing.Size(500, 140)
+  $form.StartPosition   = 'CenterScreen'
+  $form.FormBorderStyle = 'FixedDialog'
+  $form.MaximizeBox     = $false
+  $form.MinimizeBox     = $false
+  $form.ControlBox      = $false
+  $form.TopMost         = $true
+
+  $lblStage = New-Object System.Windows.Forms.Label
+  $lblStage.Location = New-Object System.Drawing.Point(18, 16)
+  $lblStage.Size     = New-Object System.Drawing.Size(380, 24)
+  $lblStage.Font     = $font
+  $lblStage.Text     = '准备中…'
+
+  $lblPercent = New-Object System.Windows.Forms.Label
+  $lblPercent.Location  = New-Object System.Drawing.Point(400, 16)
+  $lblPercent.Size      = New-Object System.Drawing.Size(82, 24)
+  $lblPercent.Font      = $font
+  $lblPercent.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+  $lblPercent.Text      = ''
+
+  $bar = New-Object System.Windows.Forms.ProgressBar
+  $bar.Location = New-Object System.Drawing.Point(18, 46)
+  $bar.Size     = New-Object System.Drawing.Size(464, 20)
+  $bar.Minimum  = 0
+  $bar.Maximum  = 100
+  $bar.Style    = [System.Windows.Forms.ProgressBarStyle]::Blocks
+
+  $lblDetail = New-Object System.Windows.Forms.Label
+  $lblDetail.Location  = New-Object System.Drawing.Point(18, 74)
+  $lblDetail.Size      = New-Object System.Drawing.Size(464, 54)
+  $lblDetail.Font      = $smallFont
+  $lblDetail.ForeColor = [System.Drawing.Color]::DimGray
+  $lblDetail.Text      = ''
+
+  $form.Controls.Add($lblStage)
+  $form.Controls.Add($lblPercent)
+  $form.Controls.Add($bar)
+  $form.Controls.Add($lblDetail)
+
+  $form.Show()
+  [System.Windows.Forms.Application]::DoEvents()
+  try { $form.Activate() } catch { }
+
+  $script:ProgressUI = New-Object psobject -Property @{
+    Form    = $form
+    Bar     = $bar
+    Stage   = $lblStage
+    Percent = $lblPercent
+    Detail  = $lblDetail
+  }
+  return $script:ProgressUI
+}
+
+function Update-Progress {
+  param(
+    [string]$Stage,
+    [int]$Percent = -1,
+    [string]$Detail,
+    [switch]$Force
+  )
+  if (-not $script:ProgressEnabled) { return }
+
+  $now = Get-Date
+  if (-not $Force -and ($now - $script:ProgressLastTick).TotalMilliseconds -lt 120) { return }
+  $script:ProgressLastTick = $now
+
+  try {
+    $ui = Get-ProgressUI
+
+    if ($PSBoundParameters.ContainsKey('Stage') -and $Stage) {
+      $ui.Stage.Text = $Stage
+      $ui.Form.Text  = ('FlClash 更新 - {0}' -f $Stage)
+    }
+
+    if ($PSBoundParameters.ContainsKey('Percent')) {
+      if ($Percent -lt 0) {
+        if ($ui.Bar.Style -ne [System.Windows.Forms.ProgressBarStyle]::Marquee) {
+          $ui.Bar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+          $ui.Bar.MarqueeAnimationSpeed = 30
+        }
+        $ui.Percent.Text = ''
+      } else {
+        if ($Percent -gt 100) { $Percent = 100 }
+        if ($ui.Bar.Style -ne [System.Windows.Forms.ProgressBarStyle]::Blocks) {
+          $ui.Bar.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+        }
+        $ui.Bar.Value = $Percent
+        $ui.Percent.Text = ('{0}%' -f $Percent)
+      }
+    }
+
+    if ($PSBoundParameters.ContainsKey('Detail')) { $ui.Detail.Text = $Detail }
+
+    $ui.Form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+  } catch { }
+}
+
+function Wait-Pump {
+  param([int]$Milliseconds = 500)
+  $deadline = (Get-Date).AddMilliseconds($Milliseconds)
+  while ((Get-Date) -lt $deadline) {
+    if ($script:ProgressEnabled) {
+      try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+    }
+    Start-Sleep -Milliseconds 50
+  }
+}
+
+function Close-ProgressUI {
+  if ($script:ProgressUI) {
+    try {
+      $script:ProgressUI.Form.Hide()
+      $script:ProgressUI.Form.Close()
+      $script:ProgressUI.Form.Dispose()
+    } catch { }
+    $script:ProgressUI = $null
+  }
 }
 
 function Read-State {
@@ -127,7 +278,7 @@ function Stop-FlClashUserProcesses {
 
   $deadline = (Get-Date).AddSeconds($GraceSeconds)
   while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 300
+    Wait-Pump 300
     if (-not (Get-Process -Name @('FlClash', 'FlClashCore') -ErrorAction SilentlyContinue)) {
       return
     }
@@ -175,6 +326,9 @@ if (`$still) {
   L ('FAIL still running: ' + ((`$still | Select-Object -ExpandProperty Name -Unique) -join ', '))
   exit 1
 }
+finally {
+  Close-ProgressUI
+}
 L 'elevated stop ok'
 exit 0
 "@
@@ -203,6 +357,7 @@ exit 0
 }
 
 function Stop-FlClashProcesses {
+  Update-Progress -Stage '3/5 退出 FlClash' -Percent -1 -Detail '正在退出 FlClash（Helper 服务可能需要 UAC 提权）…' -Force
   $running = @(Get-RunningFlClash)
   $svcRunning = Test-FlClashHelperServiceRunning
   if (-not $running -and -not $svcRunning) {
@@ -317,14 +472,14 @@ function Start-FlClash {
   }
 
   # Allow locks/mutex from force-stop to release
-  Start-Sleep -Seconds 2
+  Wait-Pump 2000
 
   Write-Log ("Starting {0}" -f $exe)
   Start-Process -FilePath $exe -WorkingDirectory $InstallDir -WindowStyle Normal | Out-Null
 
   $ready = $false
   for ($i = 0; $i -lt 20; $i++) {
-    Start-Sleep -Milliseconds 500
+    Wait-Pump 500
     if (Get-Process -Name 'FlClash' -ErrorAction SilentlyContinue) {
       $ready = $true
       break
@@ -334,16 +489,16 @@ function Start-FlClash {
   if (-not $ready) {
     Write-Log 'First start: process not found, retry'
     Start-Process -FilePath $exe -WorkingDirectory $InstallDir -WindowStyle Normal | Out-Null
-    Start-Sleep -Seconds 2
+    Wait-Pump 2000
     if (-not (Get-Process -Name 'FlClash' -ErrorAction SilentlyContinue)) {
       throw '已尝试启动 FlClash，但进程未出现。请手动运行稳定入口。'
     }
   }
 
   # FlClash is single-instance: a second launch activates / shows the existing window
-  Start-Sleep -Milliseconds 800
+  Wait-Pump 800
   Start-Process -FilePath $exe -WorkingDirectory $InstallDir -WindowStyle Normal | Out-Null
-  Start-Sleep -Milliseconds 800
+  Wait-Pump 800
 
   if (Show-FlClashWindow) {
     Write-Log 'FlClash window activated'
@@ -402,6 +557,101 @@ function Update-StableJunction {
   cmd /c "mklink /J `"$StableLink`" `"$TargetPath`"" | Out-Null
 }
 
+function Get-RemoteFileWithProgress {
+  param(
+    [string]$Url,
+    [string]$OutFile,
+    [int]$TimeoutSec = 600
+  )
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+
+  $req = [Net.HttpWebRequest]::Create($Url)
+  $req.UserAgent         = 'FlClash-Portable-Updater'
+  $req.Timeout           = $TimeoutSec * 1000
+  $req.ReadWriteTimeout  = $TimeoutSec * 1000
+  $req.AllowAutoRedirect = $true
+
+  $resp = $req.GetResponse()
+  try {
+    $total  = $resp.ContentLength
+    $in     = $resp.GetResponseStream()
+    $out    = [IO.File]::Open($OutFile, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+    $buffer = New-Object byte[] 131072
+    $sum    = 0
+    $sw     = [Diagnostics.Stopwatch]::StartNew()
+
+    try {
+      while ($true) {
+        $read = $in.Read($buffer, 0, $buffer.Length)
+        if ($read -le 0) { break }
+        $out.Write($buffer, 0, $read)
+        $sum += $read
+
+        $secs = $sw.Elapsed.TotalSeconds
+        if ($secs -lt 0.3) { continue }
+        $speed = $sum / $secs
+        $src   = ("`n来源：{0}" -f $Url)
+        if ($total -gt 0 -and $speed -gt 0) {
+          $pct  = [int](($sum * 100) / $total)
+          $left = ($total - $sum) / $speed
+          Update-Progress -Percent $pct -Detail ('已下载 {0} / {1}    速度 {2}/s    剩余约 {3}{4}' -f (Format-Size $sum), (Format-Size $total), (Format-Size $speed), (Format-Eta $left), $src)
+        } else {
+          Update-Progress -Percent -1 -Detail ('已下载 {0}    速度 {1}/s{2}' -f (Format-Size $sum), (Format-Size $speed), $src)
+        }
+      }
+    } finally {
+      $out.Close()
+      $in.Close()
+    }
+    $sw.Stop()
+
+    if ($total -gt 0 -and $sum -ne $total) {
+      throw ('下载不完整：{0} / {1} 字节' -f $sum, $total)
+    }
+    return $sum
+  } finally {
+    $resp.Close()
+  }
+}
+
+function Expand-ZipWithProgress {
+  param(
+    [string]$ZipPath,
+    [string]$Destination
+  )
+  Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop | Out-Null
+
+  $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    $total = 0
+    foreach ($e in $zip.Entries) { $total += $e.Length }
+    if ($total -le 0) { $total = 1 }
+
+    $destFull = [IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
+    $done     = 0
+    $count    = 0
+
+    foreach ($entry in $zip.Entries) {
+      $target = [IO.Path]::GetFullPath((Join-Path $Destination $entry.FullName))
+      if (-not $target.StartsWith($destFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
+
+      if ([string]::IsNullOrEmpty($entry.Name)) {
+        if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+      } else {
+        $dir = Split-Path -Parent $target
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+      }
+
+      $done += $entry.Length
+      $count++
+      Update-Progress -Percent ([int](($done * 100) / $total)) -Detail ('已解压 {0} / {1}    文件 {2} 个' -f (Format-Size $done), (Format-Size $total), $count)
+    }
+  } finally {
+    $zip.Dispose()
+  }
+}
+
 function Test-Sha256 {
   param($Release, [string]$AssetName, [string]$ZipPath)
   $sumsAsset = $Release.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
@@ -448,7 +698,10 @@ function Install-ReleasePayload {
     if (-not (Test-Path (Join-Path $destDir 'FlClash.exe'))) {
       throw ("目标目录已存在但不完整：{0}" -f $destDir)
     }
-    if ($StopBeforeInstall) { Stop-FlClashProcesses }
+    if ($StopBeforeInstall) {
+      Stop-FlClashProcesses
+      Update-Progress -Stage '4/5 解压并安装' -Percent 100 -Detail ("该版本已下载过，直接切换：{0}" -f $destDir) -Force
+    }
     Update-StableJunction -TargetPath $destDir
     Save-State -Path $destDir -Version $Tag
     return $destDir
@@ -456,27 +709,37 @@ function Install-ReleasePayload {
 
   Write-Log ("Downloading {0}" -f $asset.browser_download_url)
   $downloaded = $false
+  $tryIndex = 0
   foreach ($url in (Get-DownloadCandidates $asset.browser_download_url)) {
+    $tryIndex++
     try {
       Write-Log ("Try URL {0}" -f $url)
-      Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+      $note = ''
+      if ($tryIndex -gt 1) { $note = "（直连失败，正在尝试镜像 $($tryIndex - 1)）" }
+      Update-Progress -Stage '1/5 下载安装包' -Percent 0 -Detail ("来源：{0}`n{1}" -f $url, $note) -Force
+      $null = Get-RemoteFileWithProgress -Url $url -OutFile $zipPath
       $downloaded = $true
       break
     } catch {
       Write-Log ("Download failed: {0}" -f $_.Exception.Message)
+      Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+      Update-Progress -Percent -1 -Detail ("该地址下载失败，正在换下一个地址…`n{0}" -f $_.Exception.Message) -Force
     }
   }
   if (-not $downloaded) { throw '下载失败。请检查网络后重试。' }
 
+  Update-Progress -Stage '2/5 校验安装包' -Percent -1 -Detail '正在校验文件完整性（SHA256）…' -Force
   Test-Sha256 -Release $Release -AssetName $asset.name -ZipPath $zipPath
+  Update-Progress -Percent 100 -Detail '校验完成' -Force
 
   if ($StopBeforeInstall) {
     Stop-FlClashProcesses
   }
 
+  Update-Progress -Stage '4/5 解压并安装' -Percent 0 -Detail '正在解压安装包…' -Force
   if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
   New-Item -ItemType Directory -Path $extract -Force | Out-Null
-  Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+  $null = Expand-ZipWithProgress -ZipPath $zipPath -Destination $extract
 
   $payload = $extract
   $children = Get-ChildItem $extract -Force
@@ -487,6 +750,7 @@ function Install-ReleasePayload {
     throw '解压后未找到 FlClash.exe'
   }
 
+  Update-Progress -Stage '4/5 解压并安装' -Percent -1 -Detail '正在切换到新版本目录…' -Force
   Move-Item -Path $payload -Destination $destDir
   Update-StableJunction -TargetPath $destDir
   Save-State -Path $destDir -Version $Tag
@@ -495,7 +759,7 @@ function Install-ReleasePayload {
   if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
 
   Write-Log ("Installed {0} @ {1}" -f $Tag, $destDir)
-  return $destDir
+  Write-Output -NoEnumerate $destDir
 }
 
 # --- main ---
@@ -519,7 +783,10 @@ try {
     $release = Get-LatestRelease
     $tag = $release.tag_name.TrimStart('v')
     Write-Log ("Bootstrap download v{0}" -f $tag)
+    $script:ProgressEnabled = $true
+    Update-Progress -Stage '1/5 下载安装包' -Percent 0 -Detail ("首次安装：正在下载 v{0}…" -f $tag) -Force
     $dest = Install-ReleasePayload -Release $release -Tag $tag
+    Close-ProgressUI
     if (-not $dest) { exit 1 }
     exit 0
   }
@@ -570,11 +837,18 @@ try {
   $oldPath = $state.currentPath
   $oldVer  = $state.currentVersion
 
-  $dest = Install-ReleasePayload -Release $release -Tag $tag -StopBeforeInstall
-  if (-not $dest) { exit 0 }
+  $script:ProgressEnabled = $true
+  Update-Progress -Stage '1/5 下载安装包' -Percent 0 -Detail '正在准备下载…' -Force
 
+  $dest = Install-ReleasePayload -Release $release -Tag $tag -StopBeforeInstall
+  if (-not $dest) { Close-ProgressUI; exit 0 }
+
+  Update-Progress -Stage '5/5 收尾' -Percent -1 -Detail '正在删除旧版本目录…' -Force
   Remove-OldInstall -OldPath $oldPath -NewPath $dest
+
+  Update-Progress -Stage '5/5 启动 FlClash' -Percent -1 -Detail '正在启动新版本…' -Force
   Start-FlClash -InstallDir $dest
+  Update-Progress -Stage '完成' -Percent 100 -Detail '更新完成' -Force
 
   Show-Info ("更新完成：v{0} → v{1}`n`n已启动新版本（若未看到窗口，请点托盘图标）。`n稳定入口：`n  {2}\FlClash.exe" -f $oldVer, $tag, $StableLink)
   exit 0
@@ -585,4 +859,7 @@ catch {
     Show-Info ("更新出错：`n{0}`n`n详情见日志：`n{1}" -f $_.Exception.Message, $LogPath)
   }
   exit 1
+}
+finally {
+  Close-ProgressUI
 }
