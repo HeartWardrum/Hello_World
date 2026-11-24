@@ -6,6 +6,10 @@
   流程：文章页 →「立即下载」(/go?post_id=) → 跳转页 → 解析百度网盘二维码 data 参数 →
   复制链接/提取码 → 启动百度网盘并打开分享页。
 
+  gamer520 现在会对非浏览器 HTTP 客户端返回 403 / Cloudflare 挑战页，因此 Get-Html 在
+  HTTP 失败时会自动改用本机 Chrome/Edge 的 --headless=new --dump-dom 抓取渲染后的 HTML
+  （真实浏览器指纹 + 持久化 profile 缓存 cf_clearance），无需手动干预。
+
 .EXAMPLE
   .\Gamer520-BaiduDownload.ps1 -Url 'https://www.gamer520.com/125476.html'
   .\Gamer520-BaiduDownload.ps1 -Url '...' -ExtractOnly
@@ -24,7 +28,10 @@ param(
   [switch]$ExtractOnly,
 
   # 额外用浏览器打开百度分享页（默认不开，避免网页验证码/干扰）
-  [switch]$OpenBrowser
+  [switch]$OpenBrowser,
+
+  # 只用 HTTP 请求抓取，不启用浏览器兜底（gamer520 现在有 Cloudflare 防护，一般不建议）
+  [switch]$NoBrowser
 )
 
 Set-StrictMode -Version Latest
@@ -50,11 +57,144 @@ function Write-Warn2 {
   Write-Host "[!] $Message" -ForegroundColor Yellow
 }
 
+
+# 返回本机可用的 Chromium 内核浏览器（Chrome 优先，其次 Edge），按顺序尝试
+function Get-BrowserExeList {
+  $candidates = @(
+    "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+  )
+  $found = @()
+  foreach ($p in $candidates) {
+    if ($p -and (Test-Path -LiteralPath $p)) { $found += $p }
+  }
+  return $found
+}
+
+function Test-CloudflareChallenge {
+  param([string]$Html)
+  if ([string]::IsNullOrWhiteSpace($Html)) { return $true }
+  if ($Html -match '(?i)Just a moment|challenge-platform|cf_chl_|Enable JavaScript and cookies|Access denied|Error 1015|cf-error-details|Sorry, you have been blocked') { return $true }
+  # 几乎没内容的响应也算失败（正常页面至少几百字节）
+  if ($Html.Length -lt 200) { return $true }
+  return $false
+}
+
+# gamer520 现在对所有非浏览器 HTTP 客户端返回 403 / Cloudflare 挑战页。
+# 这里用本机 Chrome/Edge 的 headless 模式（真实浏览器指纹 + 独立持久化 profile 保留 cf_clearance
+# cookie）抓取页面，再用 --dump-dom 把渲染后的 HTML 取回来。
+function Read-TextFileShared {
+  param([string]$Path)
+  for ($i = 0; $i -lt 40; $i++) {
+    try {
+      $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      try {
+        $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
+        try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+      } finally { $fs.Dispose() }
+    } catch {
+      Start-Sleep -Milliseconds 200
+    }
+  }
+  return ''
+}
+
+# headless 模式下浏览器默认 UA 带 "HeadlessChrome"，会被 Cloudflare 直接拦；
+# 这里按本机浏览器真实版本拼一个普通 Chrome UA，保证 UA 与 TLS 指纹一致。
+function Get-BrowserUserAgent {
+  param([string]$Exe)
+  $ver = $null
+  try {
+    $v = (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion
+    if ($v -match '^\d+\.\d+\.\d+\.\d+$') { $ver = $v }
+  } catch {}
+  if (-not $ver) { return $UserAgent }
+  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$ver Safari/537.36"
+}
+
+function Invoke-BrowserDumpOnce {
+  param(
+    [string]$Exe,
+    [string]$UserDataDir,
+    [string]$Uri,
+    [string]$Ua,
+    [string]$OutFile,
+    [string]$ErrFile,
+    [int]$WaitSeconds = 75
+  )
+
+  $argList = @(
+    "--user-data-dir=`"$UserDataDir`"",
+    '--headless=new',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-breakpad',
+    '--virtual-time-budget=20000',
+    '--dump-dom',
+    "--user-agent=`"$Ua`"",
+    "`"$Uri`""
+  ) -join ' '
+
+  $cmdLine = "`"`"$Exe`" $argList > `"$OutFile`" 2> `"$ErrFile`"`""
+  $c = Start-Process -FilePath "$env:COMSPEC" -ArgumentList "/c $cmdLine" -NoNewWindow -PassThru
+  if (-not $c.WaitForExit($WaitSeconds * 1000)) { try { $c.Kill() } catch {} }
+  return (Read-TextFileShared -Path $OutFile)
+}
+
+function Get-HtmlViaBrowser {
+  param(
+    [Parameter(Mandatory)][string]$Uri,
+    [int]$WaitSeconds = 75
+  )
+
+  $exes = Get-BrowserExeList
+  if (-not $exes -or $exes.Count -eq 0) { return $null }
+
+  $profileDir = Join-Path $env:LOCALAPPDATA 'Gamer520-Download\browser-profile'
+  if (-not (Test-Path -LiteralPath $profileDir)) {
+    New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+  }
+
+  $outFile = Join-Path $env:TEMP ("gamer520-dump-" + [guid]::NewGuid().ToString('N') + '.html')
+  $errFile = Join-Path $env:TEMP ("gamer520-dump-" + [guid]::NewGuid().ToString('N') + '.log')
+  $tmpProfiles = @()
+  try {
+    foreach ($exe in $exes) {
+      $ua = Get-BrowserUserAgent -Exe $exe
+
+      # 先用持久化 profile（缓存的 cf_clearance 能省一次验证）
+      $html = Invoke-BrowserDumpOnce -Exe $exe -UserDataDir $profileDir -Uri $Uri -Ua $ua `
+        -OutFile $outFile -ErrFile $errFile -WaitSeconds $WaitSeconds
+      if (-not [string]::IsNullOrWhiteSpace($html)) { return $html }
+
+      # 持久化 profile 被占用 / 启动失败时，用一次性临时 profile 再试
+      $altProfile = Join-Path $env:TEMP ("gamer520-profile-" + [guid]::NewGuid().ToString('N'))
+      $tmpProfiles += $altProfile
+      $html = Invoke-BrowserDumpOnce -Exe $exe -UserDataDir $altProfile -Uri $Uri -Ua $ua `
+        -OutFile $outFile -ErrFile $errFile -WaitSeconds $WaitSeconds
+      if (-not [string]::IsNullOrWhiteSpace($html)) { return $html }
+    }
+    return ''
+  } finally {
+    Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue -WhatIf:$false
+    foreach ($tp in $tmpProfiles) {
+      Remove-Item -LiteralPath $tp -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
+    }
+  }
+}
 function Get-Html {
   param(
     [Parameter(Mandatory)][string]$Uri,
-    [string]$Referer
+    [string]$Referer,
+    [switch]$NoBrowser
   )
+
   $headers = @{
     'User-Agent' = $UserAgent
     'Accept'     = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -62,11 +202,44 @@ function Get-Html {
   }
   if ($Referer) { $headers['Referer'] = $Referer }
 
-  $resp = Invoke-WebRequest -Uri $Uri -Headers $headers -UseBasicParsing -TimeoutSec 45
-  [pscustomobject]@{
-    Uri     = if ($resp.BaseResponse -and $resp.BaseResponse.ResponseUri) { $resp.BaseResponse.ResponseUri.AbsoluteUri } else { $Uri }
-    Content = $resp.Content
+  $reason = $null
+  try {
+    $resp = Invoke-WebRequest -Uri $Uri -Headers $headers -UseBasicParsing -TimeoutSec 45
+    $content = [string]$resp.Content
+    if (-not (Test-CloudflareChallenge -Html $content)) {
+      return [pscustomobject]@{
+        Uri     = if ($resp.BaseResponse -and $resp.BaseResponse.ResponseUri) { $resp.BaseResponse.ResponseUri.AbsoluteUri } else { $Uri }
+        Content = $content
+        Source  = 'http'
+      }
+    }
+    $reason = 'Cloudflare 挑战页'
+  } catch {
+    $reason = $_.Exception.Message
   }
+
+  if ($NoBrowser) { throw "HTTP 抓取失败（$reason）: $Uri" }
+
+  $browsers = Get-BrowserExeList
+  if (-not $browsers -or $browsers.Count -eq 0) {
+    throw "HTTP 抓取被拦截（$reason），且本机未找到 Chrome / Edge 可用于兜底抓取: $Uri"
+  }
+  Write-Warn2 "HTTP 抓取被拦截（$reason），改用本机浏览器内核抓取: $Uri"
+  $html = Get-HtmlViaBrowser -Uri $Uri
+  if ([string]::IsNullOrWhiteSpace($html)) {
+    throw "浏览器抓取也没有返回内容: $Uri"
+  }
+  if (Test-CloudflareChallenge -Html $html) {
+    # 首次访问时可能还停留在 Cloudflare 验证页，等待其自动通过后重试一次
+    Write-Warn2 '浏览器首次抓取遇到 Cloudflare 验证页，等待后重试...'
+    Start-Sleep -Seconds 4
+    $html = Get-HtmlViaBrowser -Uri $Uri
+  }
+  if ([string]::IsNullOrWhiteSpace($html) -or (Test-CloudflareChallenge -Html $html)) {
+    throw "浏览器抓取被 Cloudflare 拦截（$Uri）。可先在浏览器中打开该页面通过验证后重试。"
+  }
+  Write-Ok '浏览器抓取成功'
+  return [pscustomobject]@{ Uri = $Uri; Content = $html; Source = 'browser' }
 }
 
 function Get-PostId {
@@ -270,7 +443,7 @@ if ($Url -notmatch '^https?://') {
 }
 
 Write-Step "读取文章页: $Url"
-$article = Get-Html -Uri $Url
+$article = Get-Html -Uri $Url -NoBrowser:$NoBrowser
 $postId = Get-PostId -Html $article.Content -PageUrl $Url
 $filePwd = Get-FilePassword -Html $article.Content
 if (-not $postId) { throw '未找到 post_id / 立即下载入口' }
@@ -278,13 +451,26 @@ Write-Ok "post_id=$postId$(if ($filePwd) { ", 文件密码=$filePwd" })"
 
 $goUrl = "https://www.gamer520.com/go?post_id=$postId"
 Write-Step "跟随立即下载: $goUrl"
-$go = Get-Html -Uri $goUrl -Referer $Url
-$jump = Get-GoRedirectUrl -Html $go.Content
-if (-not $jump) { throw '未能从 /go 页面解析跳转地址（可能被 Cloudflare 拦截）' }
-Write-Ok "跳转: $jump"
+$go = Get-Html -Uri $goUrl -Referer $Url -NoBrowser:$NoBrowser
 
-Write-Step "读取网盘页: $jump"
-$pack = Get-Html -Uri $jump -Referer $goUrl
+# /go 有时是 JS 跳转脚本，有时（浏览器抓取时）浏览器已直接跟随到最终网盘页
+$jump = Get-GoRedirectUrl -Html $go.Content
+$pack = $null
+if ($jump) {
+  Write-Ok "跳转: $jump"
+  Write-Step "读取网盘页: $jump"
+  $pack = Get-Html -Uri $jump -Referer $goUrl -NoBrowser:$NoBrowser
+} elseif ($go.Content -match 'pan\.baidu\.com') {
+  Write-Ok '浏览器已直接跟随到网盘页'
+  $pack = $go
+  $canon = [regex]::Match($go.Content, '<link[^>]+rel="canonical"[^>]+href="([^"]+)"')
+  if (-not $canon.Success) { $canon = [regex]::Match($go.Content, '<meta[^>]+property="og:url"[^>]+content="([^"]+)"') }
+  if (-not $canon.Success) { $canon = [regex]::Match($go.Content, 'https?://[A-Za-z0-9.-]*gamers520\.com/\d+\.html') }
+  if ($canon.Success) { $jump = $canon.Groups[1].Value }
+} else {
+  throw '未能从 /go 页面解析跳转地址（可能被 Cloudflare 拦截）'
+}
+
 $share = Get-BaiduShareFromPage -Html $pack.Content
 if (-not $share.ShareUrl) {
   throw '未解析到百度网盘分享地址（二维码 data / pan.baidu 链接）'
