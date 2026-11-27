@@ -35,7 +35,6 @@ function Get-InstallRoot {
 $ToolRoot     = Get-InstallRoot
 $StableLink   = Join-Path $ToolRoot 'FlClash'
 $RepoApi      = 'https://api.github.com/repos/chen08209/FlClash/releases/latest'
-$AssetSuffix  = 'windows-amd64.zip'
 $ProcessNames = @('FlClash', 'FlClashCore', 'FlClashHelperService')
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
@@ -45,16 +44,27 @@ function Write-Log {
   param([string]$Message)
   $line = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
   Add-Content -Path $LogPath -Value $line -Encoding UTF8
+  Add-ProgressLog -Line $line
 }
 
 function Show-Info {
   param([string]$Text, [string]$Title = 'FlClash 更新')
-  Close-ProgressUI
-  [System.Windows.Forms.MessageBox]::Show(
-    $Text, $Title,
-    [System.Windows.Forms.MessageBoxButtons]::OK,
-    [System.Windows.Forms.MessageBoxIcon]::Information
-  ) | Out-Null
+  if ($script:ProgressUI -and $script:ProgressUI.Form -and -not $script:ProgressUI.Form.IsDisposed) {
+    $script:ProgressUI.Form.TopMost = $false
+    [System.Windows.Forms.MessageBox]::Show(
+      $script:ProgressUI.Form,
+      $Text, $Title,
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+    Close-ProgressUI
+  } else {
+    [System.Windows.Forms.MessageBox]::Show(
+      $Text, $Title,
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+  }
 }
 
 function Show-YesNo {
@@ -68,9 +78,10 @@ function Show-YesNo {
 }
 
 # --- progress window (download / extract feedback) ---
-$script:ProgressUI       = $null
-$script:ProgressEnabled  = $false
-$script:ProgressLastTick = [datetime]::MinValue
+$script:ProgressUI         = $null
+$script:ProgressEnabled    = $false
+$script:ProgressAllowClose = $false
+$script:ProgressLastTick   = [datetime]::MinValue
 
 function Format-Size {
   param([double]$Bytes)
@@ -89,52 +100,84 @@ function Format-Eta {
 }
 
 function Get-ProgressUI {
-  if ($script:ProgressUI) { return $script:ProgressUI }
+  if ($script:ProgressUI -and $script:ProgressUI.Form -and -not $script:ProgressUI.Form.IsDisposed) {
+    return $script:ProgressUI
+  }
 
   $font      = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
   $smallFont = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+  $logFont   = New-Object System.Drawing.Font('Consolas', 9)
 
   $form = New-Object System.Windows.Forms.Form
   $form.Text            = 'FlClash 更新'
-  $form.ClientSize      = New-Object System.Drawing.Size(500, 140)
+  $form.ClientSize      = New-Object System.Drawing.Size(580, 380)
   $form.StartPosition   = 'CenterScreen'
   $form.FormBorderStyle = 'FixedDialog'
   $form.MaximizeBox     = $false
-  $form.MinimizeBox     = $false
-  $form.ControlBox      = $false
+  $form.MinimizeBox     = $true
+  $form.ControlBox      = $true
   $form.TopMost         = $true
 
   $lblStage = New-Object System.Windows.Forms.Label
   $lblStage.Location = New-Object System.Drawing.Point(18, 16)
-  $lblStage.Size     = New-Object System.Drawing.Size(380, 24)
+  $lblStage.Size     = New-Object System.Drawing.Size(450, 24)
   $lblStage.Font     = $font
   $lblStage.Text     = '准备中…'
 
   $lblPercent = New-Object System.Windows.Forms.Label
-  $lblPercent.Location  = New-Object System.Drawing.Point(400, 16)
-  $lblPercent.Size      = New-Object System.Drawing.Size(82, 24)
+  $lblPercent.Location  = New-Object System.Drawing.Point(476, 16)
+  $lblPercent.Size      = New-Object System.Drawing.Size(86, 24)
   $lblPercent.Font      = $font
   $lblPercent.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
   $lblPercent.Text      = ''
 
   $bar = New-Object System.Windows.Forms.ProgressBar
   $bar.Location = New-Object System.Drawing.Point(18, 46)
-  $bar.Size     = New-Object System.Drawing.Size(464, 20)
+  $bar.Size     = New-Object System.Drawing.Size(544, 22)
   $bar.Minimum  = 0
   $bar.Maximum  = 100
   $bar.Style    = [System.Windows.Forms.ProgressBarStyle]::Blocks
 
   $lblDetail = New-Object System.Windows.Forms.Label
-  $lblDetail.Location  = New-Object System.Drawing.Point(18, 74)
-  $lblDetail.Size      = New-Object System.Drawing.Size(464, 54)
+  $lblDetail.Location  = New-Object System.Drawing.Point(18, 76)
+  $lblDetail.Size      = New-Object System.Drawing.Size(544, 38)
   $lblDetail.Font      = $smallFont
   $lblDetail.ForeColor = [System.Drawing.Color]::DimGray
   $lblDetail.Text      = ''
+
+  $lblLogTitle = New-Object System.Windows.Forms.Label
+  $lblLogTitle.Location  = New-Object System.Drawing.Point(18, 120)
+  $lblLogTitle.Size      = New-Object System.Drawing.Size(200, 20)
+  $lblLogTitle.Font      = $smallFont
+  $lblLogTitle.ForeColor = [System.Drawing.Color]::FromArgb(70, 70, 70)
+  $lblLogTitle.Text      = '更新日志：'
+
+  $txtLog = New-Object System.Windows.Forms.TextBox
+  $txtLog.Location    = New-Object System.Drawing.Point(18, 142)
+  $txtLog.Size        = New-Object System.Drawing.Size(544, 220)
+  $txtLog.Multiline   = $true
+  $txtLog.ReadOnly    = $true
+  $txtLog.ScrollBars  = [System.Windows.Forms.ScrollBars]::Vertical
+  $txtLog.WordWrap    = $true
+  $txtLog.Font        = $logFont
+  $txtLog.BackColor   = [System.Drawing.Color]::FromArgb(248, 249, 250)
+  $txtLog.ForeColor   = [System.Drawing.Color]::FromArgb(33, 37, 41)
 
   $form.Controls.Add($lblStage)
   $form.Controls.Add($lblPercent)
   $form.Controls.Add($bar)
   $form.Controls.Add($lblDetail)
+  $form.Controls.Add($lblLogTitle)
+  $form.Controls.Add($txtLog)
+
+  $script:ProgressAllowClose = $false
+  $form.Add_FormClosing({
+    param($s, $e)
+    if (-not $script:ProgressAllowClose -and $e.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) {
+      $e.Cancel = $true
+      $s.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
+    }
+  })
 
   $form.Show()
   [System.Windows.Forms.Application]::DoEvents()
@@ -146,8 +189,26 @@ function Get-ProgressUI {
     Stage   = $lblStage
     Percent = $lblPercent
     Detail  = $lblDetail
+    LogBox  = $txtLog
   }
   return $script:ProgressUI
+}
+
+function Add-ProgressLog {
+  param([string]$Line)
+  if (-not $script:ProgressEnabled) { return }
+  try {
+    $ui = Get-ProgressUI
+    if ($ui.LogBox.TextLength -gt 0) {
+      $ui.LogBox.AppendText("`r`n" + $Line)
+    } else {
+      $ui.LogBox.AppendText($Line)
+    }
+    $ui.LogBox.SelectionStart = $ui.LogBox.TextLength
+    $ui.LogBox.ScrollToCaret()
+    $ui.Form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+  } catch { }
 }
 
 function Update-Progress {
@@ -209,6 +270,7 @@ function Wait-Pump {
 function Close-ProgressUI {
   if ($script:ProgressUI) {
     try {
+      $script:ProgressAllowClose = $true
       $script:ProgressUI.Form.Hide()
       $script:ProgressUI.Form.Close()
       $script:ProgressUI.Form.Dispose()
@@ -231,7 +293,7 @@ function Read-State {
   }
   if (-not $state.currentPath -or -not (Test-Path (Join-Path $state.currentPath 'FlClash.exe'))) {
     $found = Get-ChildItem $ToolRoot -Directory -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match '^FlClash-(\d+\.\d+\.\d+)-windows-amd64$' } |
+      Where-Object { $_.Name -match '^FlClash-(\d+\.\d+\.\d+)-windows-amd64(?:-portable)?$' } |
       Sort-Object {
         if ($_.Name -match 'FlClash-(\d+\.\d+\.\d+)-') { [version]$Matches[1] } else { [version]'0.0.0' }
       } -Descending |
@@ -325,9 +387,6 @@ while ((Get-Date) -lt `$deadline) {
 if (`$still) {
   L ('FAIL still running: ' + ((`$still | Select-Object -ExpandProperty Name -Unique) -join ', '))
   exit 1
-}
-finally {
-  Close-ProgressUI
 }
 L 'elevated stop ok'
 exit 0
@@ -652,10 +711,33 @@ function Expand-ZipWithProgress {
   }
 }
 
+function Find-PortableAsset {
+  param($Release)
+  $assets = @($Release.assets)
+  $nonDev = @($assets | Where-Object { $_.name -notmatch '(?i)-dev-' })
+
+  $candidates = @(
+    ($nonDev | Where-Object { $_.name -like '*windows-amd64-portable.zip' } | Select-Object -First 1),
+    ($nonDev | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1),
+    ($nonDev | Where-Object { $_.name -like '*windows-amd64*portable*.zip' } | Select-Object -First 1),
+    ($assets | Where-Object { $_.name -like '*windows-amd64-portable.zip' } | Select-Object -First 1),
+    ($assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1)
+  )
+  foreach ($c in $candidates) {
+    if ($c) { return $c }
+  }
+  return $null
+}
+
 function Test-Sha256 {
   param($Release, [string]$AssetName, [string]$ZipPath)
-  $sumsAsset = $Release.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
-  if (-not $sumsAsset) { return }
+  $sumsAsset = $Release.assets | Where-Object {
+    $_.name -eq 'SHA256SUMS' -or ($_.name -notmatch '(?i)-dev-' -and $_.name -like '*SHA256SUMS*')
+  } | Select-Object -First 1
+  if (-not $sumsAsset) {
+    Write-Log 'SHA256 skip: no SHA256SUMS asset found'
+    return
+  }
   try {
     $sumsText = $null
     foreach ($url in (Get-DownloadCandidates $sumsAsset.browser_download_url)) {
@@ -664,7 +746,10 @@ function Test-Sha256 {
         break
       } catch { }
     }
-    if (-not $sumsText) { return }
+    if (-not $sumsText) {
+      Write-Log 'SHA256 skip: failed to download checksums'
+      return
+    }
     $line = ($sumsText -split "`n" | Where-Object { $_ -match [regex]::Escape($AssetName) } | Select-Object -First 1)
     if ($line -match '([A-Fa-f0-9]{64})') {
       $expect = $Matches[1].ToLowerInvariant()
@@ -673,7 +758,9 @@ function Test-Sha256 {
         Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
         throw "校验失败（SHA256 不匹配）"
       }
-      Write-Log 'SHA256 OK'
+      Write-Log ('SHA256 OK ({0})' -f $sumsAsset.name)
+    } else {
+      Write-Log ('SHA256 skip: entry not found for {0}' -f $AssetName)
     }
   } catch {
     if ($_.Exception.Message -match 'SHA256') { throw }
@@ -687,8 +774,9 @@ function Install-ReleasePayload {
     [string]$Tag,
     [switch]$StopBeforeInstall
   )
-  $asset = $Release.assets | Where-Object { $_.name -like "*$AssetSuffix" } | Select-Object -First 1
-  if (-not $asset) { throw "GitHub 上未找到 $AssetSuffix 资源" }
+  $asset = Find-PortableAsset -Release $Release
+  if (-not $asset) { throw 'GitHub 上未找到适用于 windows-amd64 的便携版压缩包资源' }
+  Write-Log ("Selected asset: {0}" -f $asset.name)
 
   $destDir = Join-Path $ToolRoot ("FlClash-{0}-windows-amd64" -f $Tag)
   $zipPath = Join-Path $env:TEMP ("FlClash-{0}-windows-amd64.zip" -f $Tag)
@@ -698,6 +786,7 @@ function Install-ReleasePayload {
     if (-not (Test-Path (Join-Path $destDir 'FlClash.exe'))) {
       throw ("目标目录已存在但不完整：{0}" -f $destDir)
     }
+    Write-Log ("Target already exists, switching directly: {0}" -f $destDir)
     if ($StopBeforeInstall) {
       Stop-FlClashProcesses
       Update-Progress -Stage '4/5 解压并安装' -Percent 100 -Detail ("该版本已下载过，直接切换：{0}" -f $destDir) -Force
@@ -717,7 +806,8 @@ function Install-ReleasePayload {
       $note = ''
       if ($tryIndex -gt 1) { $note = "（直连失败，正在尝试镜像 $($tryIndex - 1)）" }
       Update-Progress -Stage '1/5 下载安装包' -Percent 0 -Detail ("来源：{0}`n{1}" -f $url, $note) -Force
-      $null = Get-RemoteFileWithProgress -Url $url -OutFile $zipPath
+      $bytes = Get-RemoteFileWithProgress -Url $url -OutFile $zipPath
+      Write-Log ("Download complete: {0}" -f (Format-Size $bytes))
       $downloaded = $true
       break
     } catch {
@@ -729,6 +819,7 @@ function Install-ReleasePayload {
   if (-not $downloaded) { throw '下载失败。请检查网络后重试。' }
 
   Update-Progress -Stage '2/5 校验安装包' -Percent -1 -Detail '正在校验文件完整性（SHA256）…' -Force
+  Write-Log 'Verifying SHA256 checksum...'
   Test-Sha256 -Release $Release -AssetName $asset.name -ZipPath $zipPath
   Update-Progress -Percent 100 -Detail '校验完成' -Force
 
@@ -737,6 +828,7 @@ function Install-ReleasePayload {
   }
 
   Update-Progress -Stage '4/5 解压并安装' -Percent 0 -Detail '正在解压安装包…' -Force
+  Write-Log ("Extracting to {0}" -f $extract)
   if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
   New-Item -ItemType Directory -Path $extract -Force | Out-Null
   $null = Expand-ZipWithProgress -ZipPath $zipPath -Destination $extract
@@ -751,6 +843,7 @@ function Install-ReleasePayload {
   }
 
   Update-Progress -Stage '4/5 解压并安装' -Percent -1 -Detail '正在切换到新版本目录…' -Force
+  Write-Log ("Moving payload to {0}" -f $destDir)
   Move-Item -Path $payload -Destination $destDir
   Update-StableJunction -TargetPath $destDir
   Save-State -Path $destDir -Version $Tag
@@ -839,16 +932,19 @@ try {
 
   $script:ProgressEnabled = $true
   Update-Progress -Stage '1/5 下载安装包' -Percent 0 -Detail '正在准备下载…' -Force
+  Write-Log ("Updating v{0} -> v{1}" -f $oldVer, $tag)
 
   $dest = Install-ReleasePayload -Release $release -Tag $tag -StopBeforeInstall
   if (-not $dest) { Close-ProgressUI; exit 0 }
 
   Update-Progress -Stage '5/5 收尾' -Percent -1 -Detail '正在删除旧版本目录…' -Force
+  Write-Log ("Cleaning old install: {0}" -f $oldPath)
   Remove-OldInstall -OldPath $oldPath -NewPath $dest
 
   Update-Progress -Stage '5/5 启动 FlClash' -Percent -1 -Detail '正在启动新版本…' -Force
   Start-FlClash -InstallDir $dest
   Update-Progress -Stage '完成' -Percent 100 -Detail '更新完成' -Force
+  Write-Log ("Update finished: v{0} -> v{1}" -f $oldVer, $tag)
 
   Show-Info ("更新完成：v{0} → v{1}`n`n已启动新版本（若未看到窗口，请点托盘图标）。`n稳定入口：`n  {2}\FlClash.exe" -f $oldVer, $tag, $StableLink)
   exit 0

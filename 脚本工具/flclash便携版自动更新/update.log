@@ -71,3 +71,32 @@
 [2026-11-13 18:33:52] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
 [2026-11-13 18:33:56] Remote 0.9.3
 [2026-11-13 18:33:56] Already up to date
+[2026-11-28 07:40:59] Check started
+[2026-11-28 07:40:59] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-28 07:41:01] Remote 0.9.5
+[2026-11-28 07:41:14] ERROR: GitHub 上未找到 windows-amd64.zip 资源
+[2026-11-28 07:48:25] Check started
+[2026-11-28 07:48:25] Local 0.9.3 @ D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-28 07:48:26] Remote 0.9.5
+[2026-11-28 07:48:28] Updating v0.9.3 -> v0.9.5
+[2026-11-28 07:48:28] Selected asset: FlClash-0.9.5-windows-amd64-portable.zip
+[2026-11-28 07:48:28] Downloading https://github.com/Vialibrex/FlClash/releases/download/v0.9.5/FlClash-0.9.5-windows-amd64-portable.zip
+[2026-11-28 07:48:28] Try URL https://github.com/Vialibrex/FlClash/releases/download/v0.9.5/FlClash-0.9.5-windows-amd64-portable.zip
+[2026-11-28 07:48:34] Download complete: 66.1 MB
+[2026-11-28 07:48:34] Verifying SHA256 checksum...
+[2026-11-28 07:48:34] SHA256 skip: entry not found for FlClash-0.9.5-windows-amd64-portable.zip
+[2026-11-28 07:48:34] Stopping FlClash: FlClash, FlClashCore, FlClashHelperService, FlClashHelperService(service)
+[2026-11-28 07:48:40] Requesting admin to stop FlClashHelperService (UAC)
+[2026-11-28 07:48:43] elev: [2026-11-28 07:48:41] elevated stop begin
+[2026-11-28 07:48:43] elev: [2026-11-28 07:48:41] service status=Running
+[2026-11-28 07:48:43] elev: [2026-11-28 07:48:43] elevated stop ok
+[2026-11-28 07:48:44] FlClash stopped
+[2026-11-28 07:48:44] Extracting to D:\Cache\Temp\FlClash-extract-0.9.5
+[2026-11-28 07:48:45] Moving payload to D:\tool\FlClash-0.9.5-windows-amd64
+[2026-11-28 07:48:45] Installed 0.9.5 @ D:\tool\FlClash-0.9.5-windows-amd64
+[2026-11-28 07:48:45] Cleaning old install: D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-28 07:48:45] Removed old install D:\tool\FlClash-0.9.3-windows-amd64
+[2026-11-28 07:48:47] Starting D:\tool\FlClash-0.9.5-windows-amd64\FlClash.exe
+[2026-11-28 07:48:49] FlClash window activated
+[2026-11-28 07:48:49] Started OK pid=25256 path=D:\tool\FlClash-0.9.5-windows-amd64\FlClash.exe
+[2026-11-28 07:48:49] Update finished: v0.9.3 -> v0.9.5
