@@ -100,3 +100,7 @@
 [2026-11-28 07:48:49] FlClash window activated
 [2026-11-28 07:48:49] Started OK pid=25256 path=D:\tool\FlClash-0.9.5-windows-amd64\FlClash.exe
 [2026-11-28 07:48:49] Update finished: v0.9.3 -> v0.9.5
+[2026-11-28 13:53:58] Check started
+[2026-11-28 13:53:58] Local 0.9.5 @ D:\tool\FlClash-0.9.5-windows-amd64
+[2026-11-28 13:53:59] Remote 0.9.5
+[2026-11-28 13:53:59] Already up to date
